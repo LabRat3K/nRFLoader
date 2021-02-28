@@ -14,4 +14,4 @@ The contents of this repository, including the bootloader itself, the programmin
 Written by Andrew Williams.
 Another Useless Labrat Project.
 
-Based on PIC16F1-USB-Bootloader
+Based on [PIC16F1-USB-Bootloader](https://github.com/74hc595/PIC16F1-USB-Bootloader)

@@ -516,11 +516,12 @@ _vloop	bsf	EECON1,RD		; read word from flash
 ;; ----------
 
 ;;; Executes the flash unlock sequence, performing an erase or write.
+;;; Code direct from From the Microship 16F1823 data sheet
 ;;; arguments:	EECON1 bits CFGS, LWLO, FREE and WREN set appropriately
 ;;;		BSR=3
 ;;; returns:	none
 ;;; clobbers:	W
-UNLOCK_FLASH	; From the Microship 16F1823 data sheet
+UNLOCK_FLASH	
 	movlw 	0x55 	  ; Start of required sequence to initiate erase
 	movwf 	EECON2 	  ; Write 55h
 	movlw 	0xAA 

@@ -63,6 +63,10 @@ flash: $(HEX)
 		"\nQuit\n" > __prog.cmd
 	@$(MDB) __prog.cmd; status=$$?; rm -f __prog.cmd MPLABXLog.*; exit $$status
 
+# Test
+test:
+	./nrf16f1prog  -l 2 -r 768 -p /dev/ttyACM0 -B 115200 -w 16 sample_app/blink.hex
+
 # List supported device types
 list-devices:
 	@$(AS) -l

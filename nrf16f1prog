@@ -55,6 +55,8 @@ import argparse, errno, os, shutil, sys, time
 from serial import Serial
 from intelhex import IntelHex16bit, IntelHexError
 
+import termios
+
 __version__ = '1.1'
 __author__ = 'Matt Sarnoff (msarnoff.org) with tweaks from Andrew Williams (ratsnest.ca)'
 
@@ -271,6 +273,11 @@ def main(args):
     # open the serial port
     log(LOG_DEFAULT, 'Opening serial port '+port)
     try:
+	with open(port) as f:
+		attrs = termios.tcgetattr(f)
+		attrs[2] = attrs[2]& ~termios.HUPCL
+		termios.tcsetattr(f, termios.TCSAFLUSH, attrs)
+
         ser = Serial(port, baud)   # baud matters for NRF serial link
     except Exception, e:
         exit_with_error(7, e)
@@ -280,7 +287,6 @@ def main(args):
         time.sleep(1)
         sys.stdout.write('.')
         sys.stdout.flush()
-
 
     failed = False
     for wordaddr in range(min_address, max_address, latch_width):

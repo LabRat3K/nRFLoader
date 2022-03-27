@@ -1,7 +1,9 @@
 NRF Bootloader for PIC16F1823/25
 ================================
 
-This is a bare bones bootloader written entirely in assembly. It is still a work in progress and as of yet does not work 100%. (Still struggling with the AutoAck feature)
+This is a bare bones OTA bootloader written entirely in assembly. Designed for a microchip pic (16f1823), connected to a NRF24L01 wireless module. To communicate with the device I use an arduino with another NRF24L01 module, to take the serial commands from the bootloader, and transmit them to the device. As with the original bootloader by Matt Sarnoff, I have managed to keep the code footprint within 512-bytes.
+
+To do: extend to PIC16F1825, update the Arduino code to be more robust, replace the Arduino with a WNRF (WIFI to NRF gateway), and spend some time on the timings surrounding role (tx/rx) change, so that this can be made more reliable. But it does work! 
 
 This development was influenced by the workby Matt Sarnoff and his 512-byte USB bootloader for the 16F1454. The upload tool is cloned from the repo with minor updates to support serial communications, and a 16 byte write latch. 
 

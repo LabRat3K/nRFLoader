@@ -48,6 +48,14 @@
 # attempt to write to an address outside the device's ROM space, or to the 
 # bootloader region.)
 #
+# Audit is 7 bytes long
+#   -startAddressLowByte
+#   -startAddressHighByte
+#   -codeSizeLowByte
+#   -codeSizeHighByte
+#   -checkSumLowByte
+#   -checkSumHighByte
+#   -writeToConfig  (1=Write to Config, 0=Perform Audit Only)
 # Reset is 1 byte long. If it is 0x52 ('R'), the device is reset, and no status
 # is returned.
 
@@ -164,6 +172,16 @@ def device_reset(ser):
     return True
 
 
+def device_audit(ser, minaddr, maxaddr, filesum,  writeflag=0):
+    codesize = ((maxaddr-minaddr)+15)&0xFFF0
+    log(LOG_DEFAULT, 'Sending Audit Request %04x words at %04x : csum %04x' % (codesize, minaddr, filesum))
+    ser.write(bytearray([0x04,low(minaddr), high(minaddr), low(codesize), high(codesize),low(filesum), high(filesum), writeflag]))
+    status = ord(ser.read(1)[0])
+    if status != STATUS_OK:
+        device_error(status)
+        return False
+    else:
+        return True
 
 def main(args):
     global log_level
@@ -288,6 +306,7 @@ def main(args):
         sys.stdout.write('.')
         sys.stdout.flush()
 
+    filesum = 0
     failed = False
     for wordaddr in range(min_address, max_address, latch_width):
         row_in_range = wordaddr >= ih.minaddr() and wordaddr <= ih.maxaddr()
@@ -298,20 +317,27 @@ def main(args):
         if row_in_range:
             words = ih.tobinarray(wordaddr, size=latch_width)
             data = reduce(lambda arr,word: arr.extend([low(word), high(word)]) or arr, words, [])
+            checksum = sum(data)
+            filesum  = filesum+sum(words)
             checksum = -sum(data) & 0xff    # two's complement of lower 8 bits of sum of bytes
 
         # erase the row
         if not device_set_params(ser, wordaddr, checksum):
-            failed = True
-            break
+           failed = True
+           break
 
         # if the row is within the range of the hex file, program the data
         if row_in_range:
-            if not device_write(ser, data):
-                failed =  True
-                break
+           if not device_write(ser, data):
+               failed =  True
+               break
+
 
     if not failed:
+	if not filesum==0:
+	    if not  device_audit(ser, ih.minaddr(), ih.maxaddr(), -filesum &0xffff, 1):
+		failed = True
+	    log(LOG_DEFAULT, 'Audit Result:'+failed)
         device_reset(ser)
         log(LOG_DEFAULT, 'Done.')
 

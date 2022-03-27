@@ -337,7 +337,9 @@ def main(args):
 	if not filesum==0:
 	    if not  device_audit(ser, ih.minaddr(), ih.maxaddr(), -filesum &0xffff, 1):
 		failed = True
-	    log(LOG_DEFAULT, 'Audit Result:'+failed)
+	        log(LOG_DEFAULT, 'Audit Result:FAIL')
+            else:
+	        log(LOG_DEFAULT, 'Audit Result:PASS')
         device_reset(ser)
         log(LOG_DEFAULT, 'Done.')
 

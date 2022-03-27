@@ -547,6 +547,7 @@ BL_INIT
 		clrf	nrfStatus
 		clrf	nrfByteCount
 		clrf 	nrfTempByte
+		clrf	BL_WAIT_COUNT
 
 	; --- NRF Radio Register Init section ------
 		; Set AUTO_ACK, 0x00 - no P2P setup yet
@@ -609,7 +610,7 @@ BL_INIT
  ;LabRat - should change this to 0x88 - so that other clients
  ; Will ignore it.
 	BANKSEL rxpayload
-		movlw	NRF_BL_CMD
+		movlw	0x88
 		movwf	rxpayload
 		movfw	RXADDR
 		movwf	rxpayload+1

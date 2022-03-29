@@ -119,6 +119,9 @@
 		BL_SIZE_H
 		BL_WAIT_COUNT	; Countdown value as boot loader determines when to
 						; test/launch the APPLICATION
+
+		nrfTempAA
+		nrfTempRX
         end_global_vars:0
  ENDC
  if end_global_vars > 0x7F
@@ -146,8 +149,8 @@
 ; -- Main Program --
 ; ==================
  	ORG 0x000
-		clrf PCLATH
-		goto BL_INIT
+        clrf PCLATH
+        goto BL_INIT
 
  	ORG 0x004
 ; -------Interrupt Routine --------------------
@@ -204,10 +207,10 @@ _check_nrf_network
 		movfw	rxpayload
 		andlw	0xF0
 		xorlw	0x80
-		bnz	BL_MAIN_LOOP	; Invalid content.. ignore packet and keep listening
+		bnz		BL_MAIN_LOOP	; Invalid content.. ignore packet and keep listening
 
-		movfw	rxpayload	; Loop at the lower nibble to determine payload type
-		clrf	PCLATH 		; Note: JUMP table - must be kept in the same code page
+		movfw	rxpayload		; Loop at the lower nibble to determine payload type
+		clrf	PCLATH 			; Note: JUMP table - must be kept in the same code page
 		andlw	0x07
 		addwf	PCL,F
 		; --- jumptable ---
@@ -232,9 +235,8 @@ BL_CMD_BIND
 		nrfWriteRegEx NRF_RX_ADDR_P0, rxpayload+1, 3
 		nrfWriteRegEx NRF_TX_ADDR,    rxpayload+1, 3
 
-		movlw   0x02
-		movwf	nrfTempByte ; enable AA
-		nrfWriteReg NRF_EN_AA, nrfTempByte  ; BSR=2
+		bsf		nrfTempAA,1
+		nrfWriteReg NRF_EN_AA, nrfTempAA ; BSR=2
 		goto	BL_MAIN_LOOP
 
 ;;----------
@@ -317,12 +319,6 @@ _csum_loop
 		movfw	BL_CALC_SUMH		; Similar - OR the CSUMH&CSUML
 		iorwf	BL_CALC_SUML,W		;	0  = CSUM passed
 		return						;   !0 = CSUM failed
-
-	;	movfw	BL_CALC_SUMH
-	;	btfss	STATUS,Z
-	;	retlw	0x00
-	;	movfw	BL_CALC_SUML
-	;	return
 
 ;;----------.
 BL_CMD_RESET
@@ -482,9 +478,8 @@ _bl_reply	; Send the ACK packet back to the server
 	BANKSEL rxpayload
 			; This is a P2P message, so enable AutoAck for PIPE0
 		movwf	rxpayload+1
-		movlw   0x03
-		movwf	nrfTempByte
-		nrfWriteReg NRF_EN_AA, nrfTempByte  ; BSR=2
+		bsf		nrfTempAA,0
+		nrfWriteReg NRF_EN_AA, nrfTempAA ; BSR=2
 		goto	SEND_PAYLOAD	; Re-use a common SEND routine
 
 ; --- BOOT LOADER START
@@ -549,9 +544,10 @@ BL_INIT
 		clrf 	nrfTempByte
 		clrf	BL_WAIT_COUNT
 
+		clrf	nrfTempAA
 	; --- NRF Radio Register Init section ------
 		; Set AUTO_ACK, 0x00 - no P2P setup yet
-		nrfWriteReg NRF_EN_AA, nrfTempByte
+		nrfWriteReg NRF_EN_AA, nrfTempAA ; BSR=2
 
 		; Set Data Rate - 2MBPS & HIGH Power
 		nrfReadReg NRF_RF_SETUP	; Results left in W
@@ -628,13 +624,15 @@ SEND_PAYLOAD
 		bcf		WREG,0			; SET PRIM_TX
 		movwf	nrfTempByte
 		nrfWriteReg NRF_CONFIG, nrfTempByte
+
 		call 	delay_130us
+
 		nrfFlush NRF_FLUSH_RX ; Flush Rx
 
 	; Enable RXADDR for Pipe0
 		movlw 0x03
-		movwf nrfTempByte
-		nrfWriteReg NRF_EN_RXADDR, nrfTempByte
+		movwf nrfTempRX
+		nrfWriteReg NRF_EN_RXADDR, nrfTempRX
 
 		nrfWritePayload 0xA0, rxpayload,PAYLOAD_SIZE
 
@@ -647,12 +645,12 @@ _triggerXmit
 	; NRF requires CE for at least 10us
 		bsf		NRF_CE	; Enable Transmitter
 
-		movlw	27		;ToDo  get a scope on this...but seems to be working
-		nop				; Need the extra Cycle Count
+		movlw	32		; Scoped at 12 us
 		decfsz	WREG,f	; 8 instructions to make a 10us spin (@ 32Mhz)
-		goto 	$-2
+		goto 	$-1
 
 		bcf		NRF_CE
+
 	; w4ack - poll the NRF_STATUS unti the TX_DS flag is set
 	; Note: for Broadcast this is set when the transmit completes, for P2P this is set
 	; when we get an ACK from the far end. (If no far end this will never get set)
@@ -673,30 +671,31 @@ _handle_msx_rt
 
 
 _ack_done
-		movlw 0x20	; Clear the TX_DS bit
-		movwf nrfTempByte
-		nrfWriteReg NRF_STATUS, nrfTempByte
-
-		; Disable RXADDR for Pipe0
-		movlw 0x02
-		movwf nrfTempByte
-		nrfWriteReg NRF_EN_RXADDR, nrfTempByte
-
-		; Move Radio into LISTEN mode
+	; Move Radio into LISTEN mode
 		nrfReadReg NRF_CONFIG	; Results left in W
 		bsf	WREG,0
 		movwf	nrfTempByte
 		nrfWriteReg NRF_CONFIG, nrfTempByte ; BSR=2
-		nrfFlush NRF_FLUSH_RX 	; Flush Rx
+;		nrfFlush NRF_FLUSH_RX 	; Flush Rx
+
+		; Disable RXADDR for Pipe0
+	;	movlw 0x02
+	;	movwf nrfTempRX
+		bcf	nrfTempRX,0
+		nrfWriteReg NRF_EN_RXADDR, nrfTempRX
+
+		movlw 0x20	; Clear the TX_DS bit
+		movwf nrfTempByte
+		nrfWriteReg NRF_STATUS, nrfTempByte
 
 		;Start receiving
 		bsf		NRF_CE 			; From standby into Listening Mode
+		call 	delay_130us
 		goto	BL_MAIN_LOOP
 
 delay_130us
-		movlw 	200	; 130us delay
-		nop
-		nop
+		movlw 	216		; 208=130us, 216=136us
+		goto	$+1 	; Two cycles
 		decfsz	WREG,F
 		goto 	$-2
 		return

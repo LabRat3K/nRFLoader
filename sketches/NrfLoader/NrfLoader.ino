@@ -269,11 +269,11 @@ bool ReplyBind() {
         
         radio.stopListening();   // Ready to write EN_RXADDR_P0 = 1
         radio.setAutoAck(0,false);// As a broadcast first ...
-        DisplayState(tty_state, nrf_state);
-        delay(200);
+   //     DisplayState(tty_state, nrf_state);
+  //      delay(200);
          
         radio.openWritingPipe(gNRFData.pipe.txaddr); // Who I'm sending it to
-        delay(200);
+        delay(500);
                
         retCode = radio.write(msg,32); // Want to get AA working here
  
@@ -449,12 +449,13 @@ void DisplayState(uint8_t state,uint8_t nrf) {
     lcd.print("T ");
   }
 
+/*
   radio.qryAddrReg(0x07, tempstr);
   dumpMsg(tempstr,1);
 
   radio.qryAddrReg(0x17, tempstr);
   dumpMsg(tempstr,1);
-
+*/
   lcd.setCursor(19,0);
   if (gNRFData.pipe.state == PIPE_STATE_BOUND) 
     lcd.print("*");
@@ -478,7 +479,6 @@ void DisplayState(uint8_t state,uint8_t nrf) {
 
   
   lcd.setCursor(0,2);
-
 
   if (tempAA&0x02) 
      lcd.print("P1+");
@@ -536,7 +536,6 @@ void loop() {
               break;
            default:
               tty_state = TTY_STATE_IDLE; // Invalid input
-              lcd.print(inch);
               break;                    
          }
          break;

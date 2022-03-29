@@ -452,7 +452,8 @@ _commit_fail					; if jumping to here WREG !=0
 
 
 ;; ----------
-UNLOCK_FLASH	; From the Microship 16F1823 data sheet
+UNLOCK_FLASH
+	; From the Microship 16F1823 data sheet
 	; Executes the flash unlock sequence, performing an erase or write.
 		movlw 	0x55 	  ; Start of required sequence to initiate erase
 		movwf 	EECON2 	  ; Write 55h

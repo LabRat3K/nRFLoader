@@ -57,7 +57,7 @@
 ; -------------------------
 #define USER_SPACE_START (0x0200)
 #define USER_SPACE_SIZE  (0x07FF - USER_SPACE_START)
-#define DISABLE_RESET
+;#define DISABLE_RESET
 
 ; ---------------------------------------------
 ; These defines will be BOARD specific
@@ -218,7 +218,7 @@ _check_nrf_network
 		goto	BL_CMD_WRITE 	; 0x81 CMD_WRITE
 		goto	BL_CMD_COMMIT	; 0x82 CMD_COMMIT
 		goto 	BL_CMD_AUDIT	; 0x83 CMD_AUDIT
-		goto	BL_MAIN_LOOP	; 0x84 Re-enable RX mode
+		goto	BL_CMD_HEART	; 0x84 CMD_HEARTBEAT
 		goto	BL_MAIN_LOOP	; 0x85 Re-enable RX mode
 		goto	BL_CMD_RESET	; 0x86 CMD_BOOT
 		goto	BL_CMD_BIND		; 0x87 CMD_BCAST
@@ -236,8 +236,8 @@ BL_CMD_BIND
 		nrfWriteRegEx NRF_TX_ADDR,    rxpayload+1, 3
 
 		bsf		nrfTempAA,1
-		nrfWriteReg NRF_EN_AA, nrfTempAA ; BSR=2
-		goto	BL_MAIN_LOOP
+		nrfWriteReg NRF_EN_AA, nrfTempAA  ; BSR=2
+		goto	_reply_ack ;P2P confirmation BL_MAIN_LOOP
 
 ;;----------
 BL_CMD_AUDIT
@@ -467,6 +467,7 @@ UNLOCK_FLASH
 		return
 
 ;;-----------
+BL_CMD_HEART
 _reply_ack
 		movlw	0x01	; Put 0x01 in the payload
 		goto	_bl_reply
@@ -480,7 +481,7 @@ _bl_reply	; Send the ACK packet back to the server
 			; This is a P2P message, so enable AutoAck for PIPE0
 		movwf	rxpayload+1
 		bsf		nrfTempAA,0
-		nrfWriteReg NRF_EN_AA, nrfTempAA ; BSR=2
+		nrfWriteReg NRF_EN_AA, nrfTempAA ;nrfTempByte  ; BSR=2
 		goto	SEND_PAYLOAD	; Re-use a common SEND routine
 
 ; --- BOOT LOADER START
@@ -548,7 +549,7 @@ BL_INIT
 		clrf	nrfTempAA
 	; --- NRF Radio Register Init section ------
 		; Set AUTO_ACK, 0x00 - no P2P setup yet
-		nrfWriteReg NRF_EN_AA, nrfTempAA ; BSR=2
+		nrfWriteReg NRF_EN_AA, nrfTempAA ; nrfTempByte
 
 		; Set Data Rate - 2MBPS & HIGH Power
 		nrfReadReg NRF_RF_SETUP	; Results left in W

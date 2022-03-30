@@ -29,7 +29,7 @@ NRF_BL_COMMIT_SIZE      equ     1
 NRF_BL_CKSUM            equ     2
 NRF_BL_COMMIT_DATA      equ     3
 
-; AUDIT command: <0x03><ADRL><ADRH><SIZEL><SIZEH><CKSUM_ODD><CKSUM_EVEN>
+; AUDIT command: <0x03><ADRL><ADRH><SIZEL><SIZEH><CKSUM_LOW><CKSUM_HIGH>
 NRF_BL_CMD_AUDIT        equ     0x03
 NRF_BL_AUDIT_ADRL       equ     1
 NRF_BL_AUDIT_ADRH       equ     2

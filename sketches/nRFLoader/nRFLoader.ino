@@ -514,6 +514,8 @@ uint8_t pollRadio () {
                 startWaitTime=millis();
                 heart_beat_count = 0;
                 poll_count = (poll_count+1)%32;
+                lcd.setCursor(0,1);
+                lcd.print(F("                "));
                 break;
             } // end of SWITCH (nrf_state)
           } // end of BOUND handling
@@ -527,6 +529,8 @@ uint8_t pollRadio () {
           //if (millis()-startWaitTime > 7000) {
           if (heart_beat_count == 7) {
             idleRadio();
+            lcd.setCursor(0,1);
+            lcd.print(F("                "));
           }
           if (millis()-startWaitTime > 1500) {
             SendHeartBeat();
@@ -542,7 +546,9 @@ uint8_t pollRadio () {
         case NRF_STATE_W4_HEART_ACK:
           if (millis()-startWaitTime > 1000) {
             nrf_state = NRF_STATE_BOUND;
-            heart_beat_count++; 
+            heart_beat_count++;
+            lcd.setCursor(0,1);
+            lcd.print(F("- signal lost  -"));
           }
           break;
       // Add other timeout handlers here

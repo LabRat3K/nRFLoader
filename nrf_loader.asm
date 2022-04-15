@@ -7,6 +7,7 @@
 ; CHANGELOG: Version 1 (underway)
 ; WHEN       WHO WHY
 ; -------------------------------------------------------------
+; 2022-04-15 ADW Optimizations, and Fix the Audit (it wasn't working)
 ; 2022-03-27 ADW It works! (a 512 byte OTA bootloader!) (code tidy underway)
 ; 2021-02-20 ADW Clean-up.. and more clean-up. Remove the unused code and minimize.
 ; 2021-02-18 ADW Space saving - replace inline with function calls
@@ -69,6 +70,7 @@
 ; System definitions - Users should not be messing below this line.
 ; (I know you will.. we always do)
 ;
+#define BOOTLOADER_VERSION 0x03 ; <Major>.<Minor> release
 #define CLOCKRATE 32000000
 #define PAYLOAD_SIZE 32
 
@@ -76,14 +78,20 @@
 ; Bank 0 Memory : 80 bytes
 ; --------------------------
  CBLOCK 0x20
-		rxpayload:PAYLOAD_SIZE		; Values read from NRF Packet
-		TXADDR:3					; Used During Device Init
+		rxpayload:PAYLOAD_SIZE	; Values read from NRF Packet
+		TXADDR:3				; Used During Device Init
 	; -- The follow block is a cached copy from the EEPROM
-		RXADDR:3					; Device ID - 24-bit unique identifier
-		APP_SIZEL					; Filespace 0x200.. Checksum Range
-		APP_SIZEH					; Note: 16 word ROWS for checksum calc
-		APP_CSUML					; 16-bit checksum value
-		APP_CSUMH
+		RXADDR:3				; [0-2] Device ID - 24-bit unique identifier
+		DEVTYPE					; [3]Device Type
+		BL_VERSION				; [4]Bootloader Version
+		APP_MAGIC				; [5]Application Identifier
+		APP_VERSION				; [6]Application Version Identifier
+		START_CHL				; [7]Configuration Parameter
+		START_CHH				; [8]
+		APP_SIZEL				; [9]Filespace 0x200.. Checksum Range
+		APP_SIZEH				; [10]Note: 16 word ROWS for checksum calc
+		APP_CSUML				; [11]16-bit checksum value
+		APP_CSUMH				; [12]
 		end_bank0_vars:0
  ENDC
  if end_bank0_vars > 0x6F
@@ -207,7 +215,7 @@ _check_nrf_network
 		movfw	rxpayload
 		andlw	0xF0
 		xorlw	0x80
-		bnz		BL_MAIN_LOOP	; Invalid content.. ignore packet and keep listening
+		bnz	BL_MAIN_LOOP	; Invalid content.. ignore packet and keep listening
 
 		movfw	rxpayload		; Loop at the lower nibble to determine payload type
 		clrf	PCLATH 			; Note: JUMP table - must be kept in the same code page
@@ -219,7 +227,7 @@ _check_nrf_network
 		goto	BL_CMD_COMMIT	; 0x82 CMD_COMMIT
 		goto 	BL_CMD_AUDIT	; 0x83 CMD_AUDIT
 		goto	BL_CMD_HEART	; 0x84 CMD_HEARTBEAT
-		goto	BL_MAIN_LOOP	; 0x85 Re-enable RX mode
+		goto	BL_CMD_QRY		; 0x85 Re-enable RX mode
 		goto	BL_CMD_RESET	; 0x86 CMD_BOOT
 		goto	BL_CMD_BIND		; 0x87 CMD_BCAST
 
@@ -230,10 +238,27 @@ _check_nrf_network
 ;;----------
 BL_CMD_BIND
 	; Server requests AutoAck Pipe (address in payload)
-	; 0x87,<Addr0>,<Addr1>,<Addr2>
-	;
-		nrfWriteRegEx NRF_RX_ADDR_P0, rxpayload+1, 3
-		nrfWriteRegEx NRF_TX_ADDR,    rxpayload+1, 3
+	; 0x87,<DevId0>,<DevId1>,<DevId2>,<Addr0>,<Addr1>,<Addr2>
+		; Check for address match
+		movfw   RXADDR          ; Test Byte 0
+		xorwf   rxpayload+1,W
+		btfss   STATUS,Z  ; if matched, keep going
+		goto    BL_MAIN_LOOP
+
+		xorwf   RXADDR+1,W      ; Test Byte 1
+		xorwf   rxpayload+2,W
+		btfss   STATUS,Z  ; if matched, keep going
+		goto    BL_MAIN_LOOP
+
+		xorwf   RXADDR+2,W      ; Test Byte 2
+		xorwf   rxpayload+3,W
+		btfss   STATUS,Z  ; Addressed to me?
+		goto    BL_MAIN_LOOP
+
+		; All three matched, use the P2P address
+		nrfWriteRegEx NRF_RX_ADDR_P0, rxpayload+4, 3
+		nrfWriteRegEx NRF_TX_ADDR,    rxpayload+4, 3
+
 
 		bsf		nrfTempAA,1
 		nrfWriteReg NRF_EN_AA, nrfTempAA  ; BSR=2
@@ -262,8 +287,8 @@ BL_CMD_AUDIT
 		movwf	APP_CSUMH
 
 		call	sub_bl_audit	; invoke the CSUM routine - results stored in W
-		btfss	STATUS,Z		;    0 = success (csum matched)
-		goto	_reply_nack		;    1 = failure (mismatch)
+		decfsz	WREG,W			;    1 = success (csum matched)
+		goto	_reply_nack		;    0 = failure (mismatch)
 		call	sub_write_csum
 		goto	_reply_ack		; Return AUDIT results to the caller.
 
@@ -538,7 +563,7 @@ BL_INIT
 
 	; --- RAM Init section ------
 		; copy EEPROM data to RAM Cache
-		call 	BL_READ_ID 			; Call to read EEPROM data into page 0 variables
+		call 	BL_POPULATE_CACHE	; Call to read EEPROM data into page 0 variables
 
 	; --- Global Parameters
 		clrf	nrfStatus
@@ -558,26 +583,18 @@ BL_INIT
 		nrfWriteReg NRF_RF_SETUP, nrfTempByte
 
 		; Set STATUS, RX_DR | TX_DS | MAX_RT
-		movlw	0x70
-		movwf	nrfTempByte
-		nrfWriteReg NRF_STATUS, nrfTempByte
+		nrfWriteRegL  NRF_STATUS, 0x70
 
 		; Set RF_CH, 82 (avoid WIFI interference (we hope))
-		movlw	82
-		movwf	nrfTempByte
-		nrfWriteReg NRF_RF_CH, nrfTempByte
+		nrfWriteRegL NRF_RF_CH, 82
 
 		nrfFlush NRF_FLUSH_TX ; Flush Tx
 
 		; Set CRC Length -
-		movlw	0x7E	; CRC0 |  EN_CRC | PWR_UP
-		movwf	nrfTempByte
-		nrfWriteReg NRF_CONFIG, nrfTempByte
+		nrfWriteRegL NRF_CONFIG, 0x7E	; CRC0 |  EN_CRC | PWR_UP
 
 		; Setup for 3 byte address length
-		movlw	0x01
-		movwf	nrfTempByte
-		nrfWriteReg NRF_SETUP_AW, nrfTempByte
+		nrfWriteRegL NRF_SETUP_AW, 0x01
 
 		; Write the payload size for Pipe 0 & 1
 		movlw PAYLOAD_SIZE
@@ -597,12 +614,11 @@ BL_INIT
 		nrfWriteRegEx NRF_RX_ADDR_P1, RXADDR, 3
 
 		; Setup max number of retries
-		movlw	0x0F
-		movwf	nrfTempByte
-		nrfWriteReg	NRF_SETUP_RETR, nrfTempByte
+		nrfWriteReg	NRF_SETUP_RETR, 0x0F
 
 	;--- End of NRF Register INIT ------
 
+BL_CMD_QRY
 	;--- Broadcast an "I am Here" message to the Server ----
 		; Announce to Server 0x87, <RXADD:3>
  ;LabRat - should change this to 0x88 - so that other clients
@@ -610,13 +626,15 @@ BL_INIT
 	BANKSEL rxpayload
 		movlw	0x88
 		movwf	rxpayload
-		movfw	RXADDR
-		movwf	rxpayload+1
-		movfw	RXADDR+1
-		movwf	rxpayload+2
-		movfw	RXADDR+2
-		movwf	rxpayload+3
+
+		clrf	FSR0H
+		movlw	LOW rxpayload+1
+		movwf	FSR0L
+		call	_read_eeprom
 		; Enqueue the payload in the Tx Register
+		; Place BootLoader version from CODE in the message
+		movlw	BOOTLOADER_VERSION
+		movwf	rxpayload+5
 SEND_PAYLOAD
 	BANKSEL LATA
 		bcf		NRF_CE
@@ -640,9 +658,7 @@ SEND_PAYLOAD
 
 _triggerXmit
 	;Clear any pending flags
-		movlw	0x70
-		movwf	nrfTempByte
-		nrfWriteReg NRF_STATUS, nrfTempByte ; BSR=2
+		nrfWriteRegL NRF_STATUS, 0x70 ; BSR=2
 
 	; NRF requires CE for at least 10us
 		bsf		NRF_CE	; Enable Transmitter
@@ -678,17 +694,12 @@ _ack_done
 		bsf	WREG,0
 		movwf	nrfTempByte
 		nrfWriteReg NRF_CONFIG, nrfTempByte ; BSR=2
-;		nrfFlush NRF_FLUSH_RX 	; Flush Rx
 
 		; Disable RXADDR for Pipe0
-	;	movlw 0x02
-	;	movwf nrfTempRX
 		bcf	nrfTempRX,0
 		nrfWriteReg NRF_EN_RXADDR, nrfTempRX
 
-		movlw 0x20	; Clear the TX_DS bit
-		movwf nrfTempByte
-		nrfWriteReg NRF_STATUS, nrfTempByte
+		nrfWriteRegL NRF_STATUS, 0x20	; Clear the TX_DS bit
 
 		;Start receiving
 		bsf		NRF_CE 			; From standby into Listening Mode
@@ -771,12 +782,13 @@ _nrf_cmd_setup
 ; ------------------------------------------------------------
 ; EEPROM read (retrieve Device ID)
 ; ------------------------------------------------------------
-BL_READ_ID
+BL_POPULATE_CACHE
 		clrf	FSR0H 				; BANK 0 variables
 		movlw	LOW RXADDR
 		movwf	FSR0L 				; Point to ID_HIGH
-		movlw	0x07
-		movwf	BL_TEMP
+_read_eeprom
+		movlw	0x10
+		movwf	BL_TEMP				; # bytes to read
 	BANKSEL EEADRL 					; Start reading at 0xF000
 		clrf	EEADRL
 
@@ -794,7 +806,7 @@ _ee_id_clock
 sub_write_csum
 		movlw	rxpayload+3
 		movwf	FSR0L
-		movlw	4
+		movlw	4				;# bytes to copy
 		movwf	BL_TEMP
 	BANKSEL EEADRL
 		movlw   0x03

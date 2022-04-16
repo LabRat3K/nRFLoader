@@ -7,7 +7,8 @@
 ; CHANGELOG: Version 1 (underway)
 ; WHEN       WHO WHY
 ; -------------------------------------------------------------
-; 2022-04-15 ADW Optimizations, and Fix the Audit (it wasn't working)
+; 2022-04-15 ADW Race condition on BIND response - add a delay seems to work
+; 2022-04-14 ADW Optimizations, and Fix the Audit (it wasn't working)
 ; 2022-03-27 ADW It works! (a 512 byte OTA bootloader!) (code tidy underway)
 ; 2021-02-20 ADW Clean-up.. and more clean-up. Remove the unused code and minimize.
 ; 2021-02-18 ADW Space saving - replace inline with function calls
@@ -82,7 +83,7 @@
 		TXADDR:3				; Used During Device Init
 	; -- The follow block is a cached copy from the EEPROM
 		RXADDR:3				; [0-2] Device ID - 24-bit unique identifier
-		DEVTYPE					; [3]Device Type
+		DEVTYPE					; [3]Device Type 0=16F1823 1=16f1825
 		BL_VERSION				; [4]Bootloader Version
 		APP_MAGIC				; [5]Application Identifier
 		APP_VERSION				; [6]Application Version Identifier
@@ -92,6 +93,7 @@
 		APP_SIZEH				; [10]Note: 16 word ROWS for checksum calc
 		APP_CSUML				; [11]16-bit checksum value
 		APP_CSUMH				; [12]
+                APP_RFCHAN				; [13] NRF RF CHAN config parameter
 		end_bank0_vars:0
  ENDC
  if end_bank0_vars > 0x6F
@@ -215,7 +217,7 @@ _check_nrf_network
 		movfw	rxpayload
 		andlw	0xF0
 		xorlw	0x80
-		bnz	BL_MAIN_LOOP	; Invalid content.. ignore packet and keep listening
+		bnz		BL_MAIN_LOOP	; Invalid content.. ignore packet and keep listening
 
 		movfw	rxpayload		; Loop at the lower nibble to determine payload type
 		clrf	PCLATH 			; Note: JUMP table - must be kept in the same code page
@@ -259,6 +261,9 @@ BL_CMD_BIND
 		nrfWriteRegEx NRF_RX_ADDR_P0, rxpayload+4, 3
 		nrfWriteRegEx NRF_TX_ADDR,    rxpayload+4, 3
 
+	; Race Condition? - need a delay so we don't reply back before
+    ;  Server is ready (or is it the radio isn't ready?)
+		call 	delay_130us
 
 		bsf		nrfTempAA,1
 		nrfWriteReg NRF_EN_AA, nrfTempAA  ; BSR=2
@@ -353,6 +358,7 @@ BL_CMD_RESET
 #ifdef DISABLE_RESET
 	goto	BL_MAIN_LOOP
 #else
+		nop   ; Debug - somewhere for a break point
 		reset
 #endif
 
@@ -634,7 +640,7 @@ BL_CMD_QRY
 		; Enqueue the payload in the Tx Register
 		; Place BootLoader version from CODE in the message
 		movlw	BOOTLOADER_VERSION
-		movwf	rxpayload+5
+		movwf	rxpayload+(BL_VERSION-RXADDR)
 SEND_PAYLOAD
 	BANKSEL LATA
 		bcf		NRF_CE
@@ -649,7 +655,7 @@ SEND_PAYLOAD
 
 		nrfFlush NRF_FLUSH_RX ; Flush Rx
 
-	; Enable RXADDR for Pipe0
+	; Enable RXADDR for Pipe0 & 1
 		movlw 0x03
 		movwf nrfTempRX
 		nrfWriteReg NRF_EN_RXADDR, nrfTempRX
@@ -809,7 +815,7 @@ sub_write_csum
 		movlw	4				;# bytes to copy
 		movwf	BL_TEMP
 	BANKSEL EEADRL
-		movlw   0x03
+		movlw   (APP_SIZEL-RXADDR) ; Offset in the EEPROM
 		movwf	EEADRL
 sub_write_csum_loop
 		moviw	FSR0++
@@ -833,13 +839,13 @@ EndofData:
 
 ;===================================================
 ; Application (loaded) space.
-	ORG	0x200
-APP_IRQ_HANDLER
-	retfie
-
-	ORG 0x204
+	ORG 0x200
 APP_EVENT_HANDLER
     goto BL_MAIN_LOOP
+
+	ORG	0x204
+APP_IRQ_HANDLER
+	retfie
 
 ; ----------------- end! -------
         END

@@ -1,5 +1,6 @@
-# Makefile for SDCC + PIC16F1xxx with USB CDC bootloader
-# Matt Sarnoff (msarnoff.org)
+# Makefile for SDCC + PIC16F1xxx with NRF Wireless bootloader
+# April 15, 2022
+# Based on the USB bootloader by Matt Sarnoff (msarnoff.org)
 # February 10, 2015
 #
 # Run `make` to build the project as a .hex file.
@@ -15,18 +16,18 @@ OUT = blink
 SRC = blink.c
 
 # Assembly files to assemble
-ASM = crt_bootloader_512.S
+ASM = nrf_bootloader_512.S
 
 # The SDCC-specific (case sensitive) part number of the chip
 # (use `make list-devices` if not known)
-CC_DEVICE = 16f1454
+CC_DEVICE = 16f1823
 
 
 
 ########## Build settings ##########
 
 CFLAGS = --use-non-free --stack-size 8 --opt-code-speed --std-sdcc99 -DNO_BIT_DEFINES
-LDFLAGS = -Wl-s16f145x_bootloader_512.lkr
+LDFLAGS = -Wl-s16f182x_bootloader_512.lkr
 PROG = ../usb16f1prog	# change this once you've installed the script
 CC = sdcc
 AS = gpasm

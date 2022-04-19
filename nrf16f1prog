@@ -65,6 +65,8 @@ from intelhex import IntelHex16bit, IntelHexError
 
 import termios
 
+import struct
+
 __version__ = '1.1'
 __author__ = 'Matt Sarnoff (msarnoff.org) with tweaks from Andrew Williams (ratsnest.ca)'
 
@@ -141,6 +143,20 @@ def device_sync(ser):
     else:
         return True
 
+def device_set_devid(ser, devid):
+    log(LOG_VERBOSE, 'Searching for device id: %06x' % devid)
+
+    ser.write(bytearray([0x05]))
+    s= (hex(devid)).replace("0x","")
+    ser.write(bytearray(s))
+
+    status = ord(ser.read(1)[0])
+    if status != STATUS_OK:
+        device_error(status)
+        return False
+    else:
+        return True
+
 def device_set_params(ser, wordaddr, checksum=None):
     log(LOG_VERBOSE, 'Erasing %d words at %04x%s' % (
         latch_width,
@@ -183,6 +199,9 @@ def device_audit(ser, minaddr, maxaddr, filesum,  writeflag=0):
     else:
         return True
 
+def auto_int(x):
+    return int(x, 0)
+
 def main(args):
     global log_level
     
@@ -224,6 +243,10 @@ def main(args):
             default=32,
             choices=[16,32],
             help='write latch width for the PIC microprocesor, 16 or 32 (defaults to 32)')
+    parser.add_argument('-D', '--device-id',
+            metavar='DEVID',
+            type=auto_int,
+            help='nRF DEvcie Id (eg. 1D0002)')
     parser.add_argument('-B', '--baud-rate',
             metavar='BAUD',
             default=115200,
@@ -250,6 +273,14 @@ def main(args):
         port = args.port
     else:
         port = os.getenv(PORT_ENV_VAR)
+
+    if args.device_id is None:
+        exit_with_error(1, 'no DeviCE ID specified');
+    else:
+        devid = args.device_id;
+
+    if not port:
+        exit_with_error(1, 'no serial port specified (use -p or set the '+PORT_ENV_VAR+' environment variable)')
 
     if not port:
         exit_with_error(1, 'no serial port specified (use -p or set the '+PORT_ENV_VAR+' environment variable)')
@@ -305,6 +336,10 @@ def main(args):
         time.sleep(1)
         sys.stdout.write('.')
         sys.stdout.flush()
+
+    if not device_set_devid(ser, devid):
+        failed = True
+        exit_with_error(8, e)
 
     filesum = 0
     failed = False

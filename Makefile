@@ -65,7 +65,7 @@ flash: $(HEX)
 
 # Test
 test:
-	./nrf16f1prog  -l 2 -r 768 -p /dev/ttyACM0 -B 115200 -w 16 sample_app/blink.hex
+	./nrf16f1prog  -l 2 -r 768 -D 0x1d0002 -p /dev/ttyACM0 -B 115200 -w 16 sample_app/blink.hex
 
 # List supported device types
 list-devices:

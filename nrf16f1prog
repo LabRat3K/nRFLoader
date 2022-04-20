@@ -79,15 +79,21 @@ BCMD_SYNC  = 0x42
 
 # Status codes
 STATUS_OK = 1
-STATUS_SYNC = 0x42
 STATUS_INVALID_COMMAND = 2
 STATUS_INVALID_CHECKSUM = 3
 STATUS_VERIFY_FAILED = 4
+STATUS_DEVID_FAILED = 5
+STATUS_SERIAL_TIMEOUT = 6
+STATUS_NRF_TIMEOUT = 7
+STATUS_SYNC = 0x42
 
 STATUS_MESSAGES = {
     STATUS_INVALID_COMMAND:     'invalid command',
     STATUS_INVALID_CHECKSUM:    'checksum failed; data not written',
-    STATUS_VERIFY_FAILED:       'write verification failed'
+    STATUS_VERIFY_FAILED:       'write verification failed',
+    STATUS_DEVID_FAILED:        'failed to set device id',
+    STATUS_SERIAL_TIMEOUT:      'timeout waiting on serial input',
+    STATUS_NRF_TIMEOUT:         'timeout waiting to hear from client device'
 }
 
 # Log levels
@@ -275,9 +281,9 @@ def main(args):
         port = os.getenv(PORT_ENV_VAR)
 
     if args.device_id is None:
-        exit_with_error(1, 'no DeviCE ID specified');
+        exit_with_error(1, 'no DeviCE ID specified')
     else:
-        devid = args.device_id;
+        devid = args.device_id
 
     if not port:
         exit_with_error(1, 'no serial port specified (use -p or set the '+PORT_ENV_VAR+' environment variable)')
@@ -339,7 +345,7 @@ def main(args):
 
     if not device_set_devid(ser, devid):
         failed = True
-        exit_with_error(8, e)
+        exit_with_error(8, 'Failure to set DeviceId')
 
     filesum = 0
     failed = False

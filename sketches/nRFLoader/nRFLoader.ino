@@ -1,4 +1,11 @@
-
+// nRFLoader - a sketch to enable OTA upgrade of devices running the nRFLoader bootloader
+//
+// (c) 2022, Andrew Williams
+// -------------------------
+// Hardware Setup - I2C connection to a 2x16 LCD
+// and an ESP24L01 Radio connected to SPI and pins 9&10
+// Serial Port: Baud 115200
+// ----------------------------------------------------
 #include <SPI.h>
 #include "RF24.h"
 #include <printf.h>
@@ -6,41 +13,39 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
-
-LiquidCrystal_I2C lcd(0x27,2,1,0,4,5,6,7,3, POSITIVE);
-
+// Configuration Parameters
 #define BAUDRATE (115200)
 
-/* Hardware configuration: Set up nRF24L01 radio on SPI bus plus pins 9 & 10 */
+// Hardware configuration:
+// Set up nRF24L01 radio on SPI bus plus pins 9 & 10
 RF24 radio(9,10);
+// I2C LCD adapter
+LiquidCrystal_I2C lcd(0x27,2,1,0,4,5,6,7,3, POSITIVE);
 
-typedef byte t_nrf_addr[5];
-#define MAX_PIPE (5)
 
-/* Addressed for this Device (Server) and the client device */
+// Global Parameters ------------------------------------------
+// ------------------------------------------------------------
 
-byte addr_server[]  = {0xC1,0xDE,0xC0};
-byte addr_p2p[]     = {0x01,0xde,0xc0}; // Pipe 1
-byte addr_client[]  = {0x00,0x00,0x1D};
-byte addr_yell[]    = {0xBB,0xDE,0xC0};
+// For easy of copying, storing the nRF address (3 bytes) as the
+// three LSB of a uint32_t
+typedef uint32_t tDeviceId;
 
-#define PIPE_STATE_IDLE    (0x00)
-#define PIPE_STATE_BUSY   (0x01)
-#define PIPE_STATE_WAITING (0x02)
+// Addresses for this Device (Server) and the client device
+tDeviceId addr_server= 0xC0DEC1; // Primary broadcast and receive for the nRFLoader
+tDeviceId addr_p2p   = 0xC0DE02; // Pipe 2 - dedicated P2P address
+tDeviceId addr_client= 0x123456; // Client device address
 
-unsigned long startWaitTime=0;
+// nRF Radio Frequency
+uint8_t gRFchan;
+uint8_t gNRF_message[32];
 
-typedef struct sPipeState {
-  uint8_t state;
-  uint8_t txaddr[3];   // Address of the target device bound to this pipe
-  uint8_t payload[32]; // Copy of the last payload sent
-} tPipeState;
+// Timestamp for any timeout event
+unsigned long gWaitTimeout=0;
+unsigned long gHeartBeatTimeout=0;
 
-struct sNRFData {
-  uint8_t channel;
-  tPipeState pipe; // Only allowing a single connection at a time..
-} gNRFData;
-
+// A firmware write takes 3 nRF messages to complete (setup/write/bind)
+// This structure maintains a cached copy of the transaction, in case
+// of failure, and a need to re-transmit.
 struct sWriteCmd {
   uint8_t addrL;
   uint8_t addrH;
@@ -56,33 +61,62 @@ struct sWriteCmd {
 //    Parsing Packet type 2 - 32 bytes of payload
 //    Parsing Packet type 3 - 'R' = RESET
 //    Parsing Packet type 4 - Audit <AddrL><AddrH><sizeL><sizeH><csumL><csumH><store>
+//    Parsing Packet type 5 - (DeviceId)
 //    Parsing Packet type 42 - SYNC request .. if see SYNC cmd, reply with SYNC response
 
-#define TTY_STATE_IDLE     (0x00)
-#define TTY_STATE_NSYNC    (0x01)
-#define TTY_STATE_W4_SETUP (0x02)
-#define TTY_STATE_W4_DATA  (0x03)
-#define TTY_STATE_W4_RESET (0x04)
-#define TTY_STATE_W4_SYNC  (0x05)
-#define TTY_STATE_W4_AUDIT (0x06)
+// Counter for clocking bytes in from the Serial port
+uint8_t gREAD_counter = 0;
 
-uint8_t tty_state = TTY_STATE_IDLE;
-uint8_t in_count = 0;
+// STATE = W4SERIAL | W4NRF | MODE
+#define STATE_IDLE   (0x80|0x40|0x00)
+#define STATE_DEVID  (0x80|0x40|0x01)
+#define STATE_BIND   (0x00|0x40|0x02)
+#define STATE_HXHDR  (0x80     |0x03)
+#define STATE_HXDATA (0x80     |0x04)
+#define STATE_SETUP  (0x00|0x40|0x05)
+#define STATE_WRITE  (0x00|0x40|0x06)
+#define STATE_COMMIT (0x00|0x40|0x07)
+#define STATE_FINISH (0x80|0x00|0x08)
+#define STATE_AUDIT  (0x00|0x40|0x09)
+#define STATE_RESET  (0x80|0x00|0x0A)
 
-#define NRF_STATE_IDLE          (0x00)
-#define NRF_STATE_W4_BIND_ACK   (0x01)
-#define NRF_STATE_BOUND         (0x02)
-#define NRF_STATE_W4_SETUP_ACK  (0x03)
-#define NRF_STATE_W4_WRITE_ACK  (0x04)
-#define NRF_STATE_W4_COMMIT_ACK (0x05)
-#define NRF_STATE_W4_AUDIT_ACK  (0x06)
-#define NRF_STATE_W4_HEART_ACK  (0x07)
+uint8_t gState = STATE_IDLE;
+#define W4Radio(x) ((x&0x40)>0)
+#define W4Serial(x) ((x&0x80)>0)
+#define mode(x)    (x&0x0F)
 
-uint8_t nrf_state = NRF_STATE_IDLE;
+#define major 0
+#define minor 2
 
+// Eye Candy - idle display
+char info_line[17];   // Text on 2nd line (changes every 2 seconds)
+unsigned long splash_timeout = 0; // Timeout value for IDLE anmation
+uint8_t phase = 0;                // Offset of string being displayed
+uint8_t dir = 1;                  // Directino of travel for animation
+
+// Splash Page: Initial strings during Arduino setup()
+void splash() {
+  // Splash Page
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(F("_nRF  WHISPERER_"));
+  sprintf(info_line," LabRat  Lights ");
+}
+
+// void idleRadio()
+// Common code to restore the radio to an idle state
+//   Pipe 1 incoming broadcasts
+//   Pipe 2 incoming P2P channel
+
+void idleRadio() {
+      radio.openReadingPipe(1,addr_server);
+      radio.openReadingPipe(2,addr_p2p);
+}
+
+// Configure the NRF24L01
+//
 void configRadio() {
-
-      radio.setChannel(gNRFData.channel);
+      radio.setChannel(gRFchan);
       radio.setPayloadSize(32);
       radio.setAddressWidth(3);
       radio.setAutoAck(false);
@@ -90,23 +124,12 @@ void configRadio() {
       radio.setDataRate(RF24_2MBPS);
       radio.setCRCLength(RF24_CRC_16);
       radio.setPALevel(RF24_PA_LOW);
-
-       idleRadio();
-         
-      radio.maskIRQ(true, true, true);     
+      idleRadio();
+      radio.maskIRQ(true, true, true);
 }
 
-void idleRadio() {
-       // Pipe 0 reserved for Writing
-      radio.openWritingPipe(addr_yell);
-      
-      radio.openReadingPipe(1,addr_server);
-      radio.openReadingPipe(2,addr_p2p);
-
-      nrf_state = NRF_STATE_IDLE;
-}
-
-
+// ** EYE CANDY ** Customer Heart Icons for the Hitachi Display
+// custom characters for the heartbeat
 byte Heart[] = {
   B00000,
   B01010,
@@ -129,245 +152,240 @@ byte Heart2[] = {
   B00000
 };
 
+
+// ---------------
+// Arduino Setup :
+// ---------------
 void setup() {
+  // Serial port for communication with the python nrfLoad.py application
   Serial.begin(BAUDRATE);
+  // Debugging Setup
   printf_begin();
 
-// I2C LCD 
-  lcd.begin(20,4);
+  // I2C LCD
+  lcd.begin(16,2);
   lcd.setBacklightPin(3,POSITIVE);
   lcd.setBacklight(HIGH);
-  lcd.clear();
-  lcd.createChar(0, Heart);
+  lcd.createChar(0, Heart);  // Blinking Heart Icon
   lcd.createChar(1, Heart2);
-  
-  gNRFData.channel=82;
-  gNRFData.pipe.state = PIPE_STATE_IDLE;
-  memset (gNRFData.pipe.txaddr,0x00,1);
+  splash();
+
+  // Default gRFchan - update to be an option to be passed in.
+  gRFchan=82;
+  addr_client = 0x00;
+  gState = STATE_IDLE;
+
   // Setup the NRF Radio sub-system
   radio.begin();
   configRadio();
   radio.startListening(); // Note  ENRXADDR_P0 = 0
+  delay(1000);
 }
 
+// Ugly Debug Code
 void dumpMsg(uint8_t * msg,unsigned char num_param) {
   char tempstr[21];
   switch (num_param) {
-    case 1:snprintf(tempstr,20,"%2.2X ",msg[0]); break;
-    case 2:snprintf(tempstr,20,"%2.2X%2.2X ",msg[0],msg[1]); break;
-    case 3:snprintf(tempstr,20,"%2.2X%2.2X%2.2X ",msg[0],msg[1],msg[2]); break;
-    case 4:snprintf(tempstr,20,"%2.2X%2.2X%2.2X%2.2X ",msg[0],msg[1],msg[2],msg[3]); break;
-    case 5:snprintf(tempstr,20,"%2.2X%2.2X%2.2X%2.2X%2.2X ",msg[0],msg[1],msg[2],msg[3],msg[4]); break;
-    case 7:snprintf(tempstr,20,"%2.2X%2.2X%2.2X%2.2X%2.2X%2.2X%2.2X ",msg[0],msg[1],msg[2],msg[3],msg[4],msg[5],msg[6]); break;
-    case 8:snprintf(tempstr,20,"%2.2X%2.2X%2.2X%2.2X%2.2X%2.2X%2.2X%2.2X ",msg[0],msg[1],msg[2],msg[3],msg[4],msg[5],msg[6],msg[7]); break;
-           
+    case 1:snprintf(tempstr,20,"%2.2X",msg[0]); break;
+    case 2:snprintf(tempstr,20,"%2.2X%2.2X",msg[0],msg[1]); break;
+    case 3:snprintf(tempstr,20,"%2.2X%2.2X%2.2X",msg[0],msg[1],msg[2]); break;
+    case 4:snprintf(tempstr,20,"%2.2X%2.2X%2.2X%2.2X",msg[0],msg[1],msg[2],msg[3]); break;
+    case 5:snprintf(tempstr,20,"%2.2X%2.2X%2.2X%2.2X%2.2X",msg[0],msg[1],msg[2],msg[3],msg[4]); break;
+    case 7:snprintf(tempstr,20,"%2.2X%2.2X%2.2X%2.2X%2.2X%2.2X%2.2X",msg[0],msg[1],msg[2],msg[3],msg[4],msg[5],msg[6]); break;
+    case 8:snprintf(tempstr,20,"%2.2X%2.2X%2.2X%2.2X%2.2X%2.2X%2.2X%2.2X",msg[0],msg[1],msg[2],msg[3],msg[4],msg[5],msg[6],msg[7]); break;
     default: snprintf(tempstr,20,"Unsupported");break;
-                
   }
   lcd.print(tempstr);
 }
 
 bool SendSetup(){
-  uint8_t * msg = gNRFData.pipe.payload;
+  uint8_t * msg = gNRF_message;
   bool retCode = false;
-       
+
+        // Build the message
         msg[0] = 0x80; // String to erase
         msg[1] = gWriteCmd.addrL;
         msg[2] = gWriteCmd.addrH;
-        msg[3] = gWriteCmd.erase; // No ERASE 
-          
+        msg[3] = gWriteCmd.erase; // No ERASE
+
+        // Send the message
         radio.stopListening(); // Ready to Write - EN_RXADDRP0 = 1
-        radio.setAutoAck(0,true);  
-        
+        radio.setAutoAck(0,true);
+
         retCode =  radio.write(msg,32); // Want to get AA working here
-        radio.setAutoAck(0,false);  
+
+        // Continue listening
+        radio.setAutoAck(0,false);
         radio.startListening(); // EN_RXADDRP0 = 0
-        
+
         lcd.setCursor(0,1);
-        #ifdef DEBUG
-            lcd.print("TxS");     
-            if (retCode == false) {
-              lcd.print("**FAILED**");  
-            } else { 
-              dumpMsg(msg,5);
-            }
-        #else
-          lcd.print("Erase ");
-          dumpMsg(&(msg[1]),2);
-        #endif
+        //0200 Erase :.0..
+        //0123456789ABCDEF
+        dumpMsg(&(msg[2]),1);
+        dumpMsg(&(msg[1]),1);
+
+        lcd.print(" Erase  : ");
+        lcd.print(retCode);
+        lcd.print(" ");
+
         return retCode;
 }
 
 bool SendReboot() {
-   uint8_t * msg = gNRFData.pipe.payload;
+   uint8_t * msg = gNRF_message;
    bool retCode =false;
-   
+
         radio.stopListening();
-        radio.setAutoAck(0,true); 
-   
+        radio.setAutoAck(0,true);
+
         msg[0] = 0x86;
-                
+
         if (radio.write(msg,32)) { // Want to get AA working here
           retCode= true;
         }
-        
-        gNRFData.pipe.state = PIPE_STATE_IDLE;
-        radio.setAutoAck(0,false); 
+
+        gState = STATE_DEVID;
+        radio.setAutoAck(0,false);
         radio.startListening();
+        lcd.setCursor(0,1);
+        lcd.print("Reset           ");
         return retCode;
 }
 
 bool SendWrite() {
-  uint8_t * msg = gNRFData.pipe.payload;
+  uint8_t * msg = gNRF_message;
   bool retCode = false;
 
-        lcd.setCursor(0,1);
-        lcd.print("Writing.. ");
-    
         radio.stopListening();
-        radio.setAutoAck(0,true);             
-        
+        radio.setAutoAck(0,true);
+
         msg[0] = 0x81; // String to erase
         memcpy(&(msg[1]),gWriteCmd.data,30);
 
         if (radio.write(msg,32)) { // Want to get AA working here
           retCode = true;
         }
-        radio.setAutoAck(0,false);       
+        radio.setAutoAck(0,false);
         radio.startListening();
-           
-        return retCode;  
+
+        lcd.setCursor(5,1);
+        //0200 Write :.0..
+        //0123456789ABCDEF
+        lcd.print("Write  : ");
+        lcd.print(retCode);
+        lcd.print(" ");
+        return retCode;
 }
 
 bool SendCommit() {
-  uint8_t * msg = gNRFData.pipe.payload;
+  uint8_t * msg = gNRF_message;
   bool retCode = false;
-  
-  
+
         radio.stopListening();
         radio.setAutoAck(0,true);
-        
+
         msg[0] = 0x82;
         msg[1] = 1;
         msg[2] = gWriteCmd.csum;
         memcpy(&(msg[3]),&(gWriteCmd.data[30]),2);
-     
 
-    
         if (radio.write(msg,32)) { // Want to get AA working here
           retCode = true;
         }
-        
-        radio.setAutoAck(0,false);         
+
+        radio.setAutoAck(0,false);
         radio.startListening();
 
-        lcd.setCursor(0,1);        
-        #ifdef DEBUG
-          lcd.print("TX=");      
-          dumpMsg(msg,5);
-        #else
-          lcd.print("Commit    ");
-        #endif
-        return retCode;   
-}
-
-bool SendAudit() {
-  uint8_t * msg = gNRFData.pipe.payload;
-  bool retCode = false;
-  
-  
-        radio.stopListening();
-        radio.setAutoAck(0,true);
-        
-        msg[0] = 0x83;
-        memcpy(&(msg[1]),gWriteCmd.data,7);
-
-    
-        if (radio.write(msg,32)) { // Want to get AA working here
-          retCode = true;
-        }
-        
-        radio.setAutoAck(0,false);         
-        radio.startListening();
-        
-        lcd.setCursor(0,1);
-        #ifdef DEBUG
-          lcd.print("TX=");
-          dumpMsg(msg,5);
-        #else
-          lcd.print("Audit..   ");
-        #endif
-        return retCode;   
-}
-
-bool SendHeartBeat() {
-  uint8_t * msg = gNRFData.pipe.payload;
-  bool retCode = false;
-  
-  
-        radio.stopListening();
-        radio.setAutoAck(0,true);
-        
-        msg[0] = 0x84;
-        msg[1] = 0x2A; // 42 .. the ultimate question;
-        msg[2] = millis()&0xff; // ensure unique packets
-        
-
-    
-        if (radio.write(msg,32)) { // Want to get AA working here
-          retCode = true;
-        }
-        
-        radio.setAutoAck(0,false);         
-        radio.startListening();
-       
-        #ifdef DEBUG
-          lcd.setCursor(0,1);
-          lcd.print("HB=");
-          dumpMsg(msg,5);
-        #endif
-        return retCode;   
-}
-
-bool ReplyBind() {
-     uint8_t * msg = gNRFData.pipe.payload;
-     bool retCode = false;
-
-         msg[0] = 0x87;
-        // Allocate a pipe and send that address to the client
-        // (for now use the default)
-        memcpy(&(msg[1]),addr_p2p,3);
-
-        msg[16]=millis()&0xff;
-   
-        
-        radio.stopListening();   // Ready to write EN_RXADDR_P0 = 1
-        radio.setAutoAck(0,false);// As a broadcast first ...
-          
-        radio.openWritingPipe(gNRFData.pipe.txaddr); // Who I'm sending it to
-        startWaitTime=millis();
-        delay(500);
-               
-        retCode = radio.write(msg,32); // Want to get AA working here
- 
-        radio.setAutoAck(2,true);// From now on ... BOUND to P2P    
-        radio.startListening(); // EN_RXADDR_P0 = 0
-        
-        lcd.setCursor(0,1);
-        #ifdef DEBUG
-          lcd.print("Tx[");       
-          if (retCode == false) {
-            lcd.print("--FAILED--");
-          } else {
-              dumpMsg(msg,5);
-          }
-        #else
-          lcd.print("Binding   ");
-        #endif 
+        lcd.setCursor(5,1);
+        //0200 Commit :.0.
+        //0123456789ABCDEF
+        lcd.print("Commit : ");
+        lcd.print(retCode);
+        lcd.print(" ");
         return retCode;
 }
 
+bool SendAudit() {
+  uint8_t * msg = gNRF_message;
+  bool retCode = false;
+
+        radio.stopListening();
+        radio.setAutoAck(0,true);
+
+        msg[0] = 0x83;
+        memcpy(&(msg[1]),gWriteCmd.data,7);
+
+        if (radio.write(msg,32)) { // Want to get AA working here
+          retCode = true;
+        }
+
+        radio.setAutoAck(0,false);
+        radio.startListening();
+
+        lcd.setCursor(0,1);
+        lcd.print("Audit..         ");
+        return retCode;
+}
+
+bool SendHeartBeat() {
+  uint8_t * msg = gNRF_message;
+  bool retCode = false;
+
+        radio.stopListening();
+        radio.setAutoAck(0,true);
+
+        msg[0] = 0x84;
+        msg[1] = 0x2A; // 42 .. the ultimate question;
+        msg[2] = millis()&0xff; // ensure unique packets
+
+        if (radio.write(msg,32)) { // Want to get AA working here
+          retCode = true;
+        }
+
+        radio.setAutoAck(0,false);
+        radio.startListening();
+
+        return retCode;
+}
+
+bool sendBindRequest() {
+     uint8_t * msg = gNRF_message;
+     bool retCode = false;
+
+         msg[0] = 0x87;
+
+        // Allocate a pipe and send that address to the client
+        // (for now use the default)
+        // Format <0x87><DevId0><DevId1><DevId2><P2P0><P2P1><P2P2>
+
+        memcpy(&(msg[1]),&addr_client,3);
+        memcpy(&(msg[4]),&addr_p2p,3);
+
+        msg[16]=millis()&0xff;
+
+        radio.stopListening();   // Ready to write EN_RXADDR_P0 = 1
+        radio.openWritingPipe(addr_server);
+        delay(1);
+        radio.setAutoAck(0,false);// As a broadcast first ...
+        gWaitTimeout=millis();
+        //delay(500);
+        retCode = radio.write(msg,32); // Want to get AA working here
+
+        radio.setAutoAck(2,true);// From now on ... BOUND to P2P
+        radio.startListening(); // EN_RXADDR_P0 = 0
+
+        lcd.setCursor(0,1);
+        uint32_t tempAddr;
+        radio.qryAddrReg(0x0C,(char *)&tempAddr);
+        lcd.print(">>");
+        lcd.print(tempAddr,HEX);
+        return retCode;
+}
+
+// Timeout values for various states
 unsigned char heart_beat_count = 0;
+unsigned long serial_timeout = 0;
+unsigned char retry_count = 0;
 uint8_t poll_count = 0;
 // --------------------------------
 // NRF_GPIO handler - toggle GPIO on Rx packets
@@ -376,427 +394,387 @@ uint8_t poll_count = 0;
 uint8_t pollRadio () {
   uint8_t pipe;
   uint8_t inbuf[32];
-  
-  if (radio.available(&pipe)) {
-      uint8_t bytes = radio.getPayloadSize(); // get the size of the payload
-      radio.read(inbuf, bytes);               // fetch payload from FIFO
-      if ((pipe == 0)|| (pipe==7)) {  
-        // Ignore - we aren't listening on 0      
-      }
-      //DEBUG CODE - Print out any received messages
-      #ifdef DEBUG
-          lcd.setCursor(0,1);
-          lcd.print("R");
-          lcd.print(pipe);
-          lcd.print("[");
-          dumpMsg(inbuf,5);
-      #endif
-      heart_beat_count = 0; // receive ANYTHING will reset the heartbeat
-      switch (gNRFData.pipe.state) {
-        case PIPE_STATE_WAITING: {
-             if (nrf_state== NRF_STATE_W4_BIND_ACK) { // IF BINDING whith command pending
-                if (inbuf[0] == 0x87) { // This is a BIND reply
-                   gNRFData.pipe.state = PIPE_STATE_BUSY;    
-              
-                   switch (nrf_state) { 
-                    case NRF_STATE_W4_SETUP_ACK:     
-                        while (!SendSetup()); 
-                        break;
-                    case NRF_STATE_W4_WRITE_ACK:
-                        while (!SendWrite());
-                        break;
-                    case NRF_STATE_W4_COMMIT_ACK:
-                        while (!SendCommit());
-                        break;
-                    case NRF_STATE_W4_AUDIT_ACK:
-                        while (!SendAudit());
-                        break;
-                    default: break; // Do Nothing
-                  } // CASE
-               }  
-            }  
-          }
-          break;
-        case PIPE_STATE_IDLE:{
-            if (inbuf[0] == 0x88) { // Device Announce
-              gNRFData.pipe.state = PIPE_STATE_BUSY;
-              memcpy(gNRFData.pipe.txaddr, &(inbuf[1]),3);
-              memcpy(addr_client,&(inbuf[1]),3); // Redundant - can be optimized
-              ReplyBind();
-              nrf_state = NRF_STATE_W4_BIND_ACK;     
-            }
-          }
-          break;
-        case PIPE_STATE_BUSY: {
-          // Handing if already BOUND
-          switch (nrf_state) {
-              case NRF_STATE_BOUND:
-                 // If Serial state is in W4 .. we need to do the action
-              case NRF_STATE_IDLE: 
-                if (inbuf[0] == 0x88) { // This is a BIND request
-                  memcpy(gNRFData.pipe.txaddr, &(inbuf[1]),3);
-                  memcpy(addr_client,&(inbuf[1]),3); // Redundant - can be optimized
-                  gNRFData.pipe.state = PIPE_STATE_BUSY;
-                  ReplyBind(); // Broadcast BOUND request
-                  nrf_state = NRF_STATE_W4_BIND_ACK;  
-                } 
-                break;
-              case NRF_STATE_W4_BIND_ACK:
-                if (inbuf[0] == 0x87) { // This is a BIND reply
-                  gNRFData.pipe.state = PIPE_STATE_BUSY;
-                  nrf_state = NRF_STATE_BOUND;
-                  startWaitTime=millis();   
-                }
-                break;
-              case NRF_STATE_W4_SETUP_ACK:
-                if (inbuf[0] == 0x80) { // This is a SETUP response
-                  if (inbuf[1] == 0x01) {
-                    // ACK
-                    nrf_state = NRF_STATE_BOUND;
-                    startWaitTime=millis();
-                    Serial.write(0x01);
-                    Serial.flush();
-                  } else {
-                    // NACK - re-send the SETUP request
-                    while (!SendSetup());
-                  }
-                }
-                break;
-              case NRF_STATE_W4_WRITE_ACK:
-                if (inbuf[0] == 0x81) { // This is a WRITE response
-                  if (inbuf[1] == 0x01) {
-                    // ACK
-                    //Build and send the COMMIT request
-                     nrf_state = NRF_STATE_W4_COMMIT_ACK;
-                     while (!SendCommit());
-                  } else {
-                    // NACK - re-send the SETUP request
-                    while (!SendWrite());
-                  }
-                }
-                break;
-              case NRF_STATE_W4_COMMIT_ACK:
-                if (inbuf[0] == 0x82) { // This is a COMMIT response
-                  if (inbuf[1] == 0x01) {
-                    // ACK
-                     nrf_state = NRF_STATE_BOUND;
-                     startWaitTime=millis();
-                     Serial.write(0x01);
-                     Serial.flush();
-                  } else {
-                    // NACK - re-send the SETUP request
-                    nrf_state = NRF_STATE_W4_SETUP_ACK;
-                    tty_state = TTY_STATE_NSYNC;
-                    while (!SendSetup());
-                  }
-                }
-                break;
-              case NRF_STATE_W4_AUDIT_ACK:
-                if (inbuf[0] == 0x83) { // This is a SETUP response
-                  if (inbuf[1] == 0x01) { 
-                     // ACK
-                     nrf_state = NRF_STATE_BOUND;
-                     startWaitTime=millis();
-                     Serial.write(0x01);
-                     Serial.flush();
-                  } else {
-                    // NACK - re-send the AUDIT request
-                     nrf_state = NRF_STATE_BOUND;
-                     startWaitTime=millis();                 
-                     Serial.write(0x00);
-                     Serial.flush();
-                  }
-                }       
-                break;
-              case NRF_STATE_W4_HEART_ACK:
-                // Any response shows life..
-                nrf_state = NRF_STATE_BOUND;
-                startWaitTime=millis();
-                heart_beat_count = 0;
-                poll_count = (poll_count+1)%32;
-                lcd.setCursor(0,1);
-                lcd.print(F("                "));
-                break;
-            } // end of SWITCH (nrf_state)
-          } // end of BOUND handling
-          break;
-        // ---------
-      }// end of CASE
- 
-  }else {
-     switch (nrf_state) {
-        case NRF_STATE_BOUND: // check for idle device timeout
-          //if (millis()-startWaitTime > 7000) {
-          if (heart_beat_count == 7) {
-            idleRadio();
-            lcd.setCursor(0,1);
-            lcd.print(F("                "));
-          }
-          if (millis()-startWaitTime > 1500) {
-            SendHeartBeat();
-            nrf_state = NRF_STATE_W4_HEART_ACK;
-            startWaitTime=millis();
-          }
-          break;
-        case NRF_STATE_W4_BIND_ACK:
-          if (millis()-startWaitTime > 1000) {
-            ReplyBind();
-          }
-          break;
-        case NRF_STATE_W4_HEART_ACK:
-          if (millis()-startWaitTime > 1000) {
-            nrf_state = NRF_STATE_BOUND;
-            heart_beat_count++;
-            lcd.setCursor(0,1);
-            lcd.print(F("- signal lost  -"));
-          }
-          break;
-      // Add other timeout handlers here
-        default:
-                // do nothing
-                break;
-     }
-  }
-}
 
+  if (radio.available(&pipe)) {
+    uint8_t bytes = radio.getPayloadSize(); // get the size of the payload
+    radio.read(inbuf, bytes);               // fetch payload from FIFO
+    if ((pipe == 0)|| (pipe==7)) {
+      // Ignore - we aren't listening on 0
+    }
+
+    //DEBUG CODE - Print out any received messages
+    #ifdef DEBUG
+        lcd.setCursor(0,1);
+        lcd.print("R");
+        lcd.print(pipe);
+        lcd.print("[");
+        dumpMsg(inbuf,5);
+    #endif
+    if (inbuf[0] != 0x85) {
+       heart_beat_count = 0; // receive ANYTHING other than BEACON will reset the heartbeat
+       gHeartBeatTimeout = millis();
+    }
+
+    switch (gState) {
+      case STATE_IDLE:
+        // If I see an 0x88 .. add to scrolling list
+        if (inbuf[0] == 0x88) { // This is a BIND request
+          // Display for giggles
+          // Display String -
+        }
+        break;
+      case STATE_BIND:
+        if (inbuf[0] == 0x88) { // This is a BIND request
+          // Display for giggles
+          sendBindRequest(); // Broadcast BOUND request
+        }
+        if (inbuf[0] == 0x87) { // This is a BIND reply
+          gState = STATE_HXHDR;
+          radio.openWritingPipe(addr_client);
+          delay(1);
+          Serial.write(0x01);
+          gWaitTimeout=millis();
+        }
+        break;
+      case STATE_SETUP:
+        if (inbuf[0] == 0x80) { // This is a SETUP response
+          if (inbuf[1] == 0x01) {
+            // ACK
+            gState = STATE_HXHDR; // Back to Parsing input?
+            gWaitTimeout=millis();
+            Serial.write(0x01);
+            Serial.flush();
+          } else {
+            // NACK - re-send the SETUP request
+            SendSetup();
+          }
+        }
+        break;
+      case STATE_WRITE:
+        if (inbuf[0] == 0x81) { // This is a WRITE response
+          if (inbuf[1] == 0x01) {
+            // ACK
+            //Build and send the COMMIT request
+             gState = STATE_COMMIT;
+             while (!SendCommit());
+          } else {
+            // NACK - re-send the SETUP request
+            while (!SendWrite());
+          }
+        }
+        break;
+      case STATE_COMMIT:
+        if (inbuf[0] == 0x82) { // This is a COMMIT response
+          if (inbuf[1] == 0x01) {
+            // ACK
+             gState = STATE_HXHDR;
+             gWaitTimeout=millis();
+             Serial.write(0x01);
+             Serial.flush();
+          } else {
+            // NACK - re-send the SETUP request
+            gState = STATE_SETUP;
+            SendSetup();
+          }
+        }
+        break;
+      case STATE_AUDIT:
+        // Check return code
+        if (inbuf[0] == 0x83) { // This is a SETUP response
+          if (inbuf[1] == 0x01) {
+             // ACK
+             gState = STATE_HXHDR; // Wait on RESET
+             gWaitTimeout=millis();
+             Serial.write(0x01);
+             Serial.flush();
+          } else {
+            // NACK - error out
+             gState = STATE_DEVID;
+             Serial.write(0x04);
+             Serial.flush();
+          }
+        }
+        break;
+      default: // Unexpected reply
+        break;
+    }// switch (gState)
+  } else {
+     // On Radio Message Timeout..
+     if (W4Radio(gState)) {
+        if (gState!=STATE_IDLE) {
+           // If failure to hear back after 5 retries
+           if (retry_count > 5) {
+            // Exit with error
+            idleRadio();
+            addr_client =0;
+            gState = STATE_IDLE;
+            retry_count = 0;
+            Serial.write(0x07);
+            splash();
+           }
+
+           // Has there been seven mised HeartBeats?
+           if (heart_beat_count == 7) {
+             idleRadio();
+           }
+
+           if (millis()-gWaitTimeout > 1000) {
+             switch (gState) {
+                case STATE_BIND:
+                  sendBindRequest();
+                  break;
+                case STATE_SETUP:
+                  SendSetup();
+                  break;
+                case STATE_WRITE:
+                  SendWrite();
+                  break;
+                case STATE_COMMIT:
+                  SendCommit();
+                  break;
+                default:
+                  // do nothing
+                  break;
+             } // switch gState
+             retry_count++;
+             gWaitTimeout= millis();
+          } //1 second Timeout
+        }// Not STATE_IDLE
+     } //W4Radio
+  } //No Radio Payload
+} // pollRadio
 
 
 char  poll_idle[4] ={'-',0xcd,'|','/'};
 char poll_bound[4]={0,1,0,' '};
 
-#ifdef DEBUG
-  void DisplayState(uint8_t state,uint8_t nrf) {
-    lcd.home (); // set cursor to 0,0
-    uint8_t tempAA = radio.qryAutoAck();
-    uint8_t tempEnRx = radio.qryEnRxaddr();
-    uint8_t tempConfig = 0x00;
-  
-    switch(state) {
-      case TTY_STATE_IDLE :    lcd.print("IDLE :"); break;
-      case TTY_STATE_NSYNC:    lcd.print("NSYNC:"); break;
-      case TTY_STATE_W4_SETUP: lcd.print("SETUP:"); break;
-      case TTY_STATE_W4_DATA:  lcd.print("DATA :"); break;
-      case TTY_STATE_W4_RESET: lcd.print("RESET:"); break;
-      case TTY_STATE_W4_SYNC:  lcd.print("SYNC :"); break;
-      default:                 lcd.print("???  :"); break;
+void DisplayState() {
+   lcd.home (); // set cursor to 0,0
+
+   if (gState==STATE_IDLE) {
+     show_idle();
+     return;
+   }
+   lcd.print("nRF:");
+
+   switch (gState) {
+    case STATE_IDLE:
+    case STATE_DEVID:
+        lcd.print("                ");
+        break;
+    case STATE_BIND:{
+          char temp[17];
+          lcd.print("Searching  ");
+               //nRF:56789ABCDE
+          lcd.setCursor(0,1);
+          sprintf(temp," device: %6.6lX ",addr_client);
+          //0123456789ABCDEF
+          // device: 1D0002
+          lcd.print(temp);
+        }
+        break;
+    default:
+          lcd.print("F/W Upload");
+               //nRF:56789ABCDE
+          break;
     }
-   
-    
-    switch(nrf) {
-      case NRF_STATE_IDLE  :        lcd.print("IDLE  "); break;
-      case NRF_STATE_W4_BIND_ACK:   lcd.print("B ACK "); break;
-      case NRF_STATE_BOUND :        lcd.print("BOUND "); break;
-      case NRF_STATE_W4_SETUP_ACK : lcd.print("S ACK "); break;
-      case NRF_STATE_W4_WRITE_ACK : lcd.print("W ACK "); break;
-      case NRF_STATE_W4_COMMIT_ACK: lcd.print("C ACK "); break;
-      case NRF_STATE_W4_AUDIT_ACK:  lcd.print("A ACK "); break;
-      case NRF_STATE_W4_HEART_ACK:  lcd.print("H ACK "); break;
-      default:                      lcd.print("UNKNOWN   "); break;
+
+   // Show the "I'm Alive" animation
+   lcd.setCursor(15,0);
+   /* Show the polling cursor */
+   poll_count = (poll_count+1)%32;
+   if ((heart_beat_count==0) && (mode(gState)>mode(STATE_BIND))){
+      lcd.print(poll_bound[poll_count/8]);
+   } else {
+      lcd.print(poll_idle[poll_count/8]);
+   }
+}
+
+// Helper routine for parsing HEX to binary
+unsigned char x2i(char input) {
+    if (input >= '0' && input <= '9') {
+        return input- '0';
+    } else if (input >= 'A' && input <= 'F') {
+        return input -('A' - 10);
+    } else if (input >= 'a' && input <= 'f') {
+        return input- ('a' - 10);
     }
-    
-     if (radio.qryCE()) {
-      lcd.print("^");
-    } else {
-      lcd.print("v");
+    return -1;
+}
+
+void show_idle() {
+  if ((millis()-splash_timeout) >100) {
+    // Clear previous Character
+    lcd.setCursor(phase%16,1);
+    lcd.write(info_line[phase%16]);
+    phase = (phase+dir);
+    // Show ICON
+    lcd.setCursor(phase,1);
+    lcd.write(255);
+
+
+    phase %=16;
+
+    //
+    if (phase == 15) {
+      dir=-1;
+      sprintf(info_line,"  version  %d.%d  ",major,minor);
+      delay(2000);
     }
-    char tempstr[10];
-    snprintf(tempstr,10,"%2.2x ", radio.qryEnRxaddr());
-    lcd.print(tempstr);
-    
-    radio.qryAddrReg(0x00, tempstr);
-    tempConfig = (uint8_t) tempstr[0];
-    if (tempConfig & 01) {
-      lcd.print("R ");
-    } else {
-      lcd.print("T ");
+    if (phase == 0) {
+      dir=1;
+      sprintf(info_line," LabRat  Lights ");
+                       //0123456789ABCDEF
+      delay(2000);
     }
-     
-  
-  /*
-    radio.qryAddrReg(0x07, tempstr);
-    dumpMsg(tempstr,1);
-  
-    radio.qryAddrReg(0x17, tempstr);
-    dumpMsg(tempstr,1);
-  */
-  
-    lcd.setCursor(19,0);
-    if (gNRFData.pipe.state == PIPE_STATE_BUSY) 
-      lcd.print("*");
-    else
-      lcd.print("-");
-    
-    lcd.setCursor(0,1);
-     
-    radio.qryAddrReg(0x0A, tempstr);
-    
-    if (tempAA&0x01) 
-       lcd.print("P0+");
-    else
-       lcd.print("P0:");
-       
-    dumpMsg(tempstr,3);
-  
-    radio.qryAddrReg(0x10,tempstr);
-    dumpMsg(tempstr,3);
-    
-    lcd.setCursor(0,2);
-  
-    if (tempAA&0x02) 
-       lcd.print("P1+");
-    else
-       lcd.print("P1:");
-       
-    radio.qryAddrReg(0x0B,tempstr);
-    dumpMsg(tempstr,3);
-    
-    if (tempAA&0x04) 
-       lcd.print("P2+");
-    else
-       lcd.print("P2:");
-    radio.qryAddrReg(0x0C,tempstr);
-    dumpMsg(tempstr,1);
-        
-    lcd.setCursor(19,3);
-    poll_count = (poll_count+1)%32;
-    if (nrf_state==NRF_STATE_IDLE) {
-        lcd.print(poll_idle[poll_count/8]);
-    } else {
-        lcd.print(poll_bound[poll_count/8]);   
-    }
+    splash_timeout = millis();
   }
-#else
-  void DisplayState(uint8_t state,uint8_t nrf) {
-     lcd.home (); // set cursor to 0,0
-  
-     lcd.print("nRF:");
-     switch(nrf) {
-      case NRF_STATE_IDLE  :        
-        lcd.print("IDLE        ");
-        lcd.setCursor(0,1);
-        lcd.print("             ");
-        break;
-      case NRF_STATE_W4_BIND_ACK:   
-        lcd.print("Connecting "); 
-        break;
-      default :                     
-        lcd.print("DevID:");
-        dumpMsg(gNRFData.pipe.txaddr,3);
-        break;
-     }
-     lcd.setCursor(19,0);
-     
-     poll_count = (poll_count+1)%32;
-     if ((heart_beat_count==0) && (nrf_state != NRF_STATE_IDLE)){
-        lcd.print(poll_bound[poll_count/8]);
-     } else {
-        lcd.print(poll_idle[poll_count/8]);  
-     }
-  }
-#endif
+}
+
+// Main Loop
+//    - Check for Serial Input
+//    - Determine Parsing of Serial based on character received
+//    -
+//
 void loop() {
   int inch =0x00;
   // Are there any Radio Payload Pending?
-  pollRadio();
+  if (W4Radio(gState))
+     pollRadio();
   // Is there any incoming Serial Pending?
-  if ( Serial.available() ) {
-    inch = Serial.read();
- 
-    switch (tty_state) {
-      case TTY_STATE_IDLE:
-         if (inch == 0x42){
-            tty_state = TTY_STATE_W4_SYNC;
-         }      
-         break;
-      case TTY_STATE_NSYNC:
-         in_count = 0;
-         switch (inch)  {
-           case 0x01 : 
-              tty_state = TTY_STATE_W4_SETUP;
-              in_count = 4;
+
+  if (W4Serial(gState)) { // In a state that requires reading the file?
+    if ( Serial.available() ) {
+      inch = Serial.read();
+      serial_timeout = millis();
+      if (gState==STATE_IDLE) {
+           // Only thing we do is wait on the SYNC
+           if (inch == 0x42){
+              gState = STATE_DEVID;
+              Serial.write(0x42);
+           }
+      } else {
+        if (gREAD_counter == 0) { // No data pending
+          switch (gState) {
+            case STATE_DEVID: // Wait for type 05 record
+              if (inch==0x05) {// nRF target device ID
+                    gREAD_counter = 6;
+                }
+                break;
+            case STATE_HXHDR: {
+                switch (inch)  { // Parse record and update state accordingly
+                   case 0x01 :
+                      // Stay in STATE_HXHDR state
+                      gREAD_counter = 4;
+                      break;
+                   case 0x02 :
+                      // Change to parsing 32 byte payload
+                      gState=STATE_HXDATA;
+                      gREAD_counter = 32;
+                      break;
+                   case 0x03 :
+                      gState = STATE_RESET;
+                      gREAD_counter = 1;
+                      break;
+                   case 0x04 :
+                      gState = STATE_FINISH; // This is the AUDIT request
+                      gREAD_counter = 7;
+                      break;
+                   default:
+                     // Invalid Record type
+                     Serial.write(0x02);
+                     gState = STATE_IDLE;
+                     splash();
+                     break;
+                }// switch (inch)
+                break;
+              } // case STATE_HXHDR
               break;
-           case 0x02 : 
-              tty_state = TTY_STATE_W4_DATA; 
-              in_count = 32;
-              break;
-           case 0x03 : 
-              tty_state = TTY_STATE_W4_RESET; 
-              in_count = 1; 
-              break;
-           case 0x04 :
-              tty_state = TTY_STATE_W4_AUDIT;
-              in_count = 7;
-              break;
-           default:
-              tty_state = TTY_STATE_IDLE; // Invalid input
-              break;                    
-         }
-         break;
-      case TTY_STATE_W4_SETUP:
-         switch (in_count) {
-             case 4: gWriteCmd.addrL = inch; break;
-             case 3: gWriteCmd.addrH = inch; break;
-             case 2: gWriteCmd.csum  = inch; break;
-             case 1: gWriteCmd.erase = (inch == 'E'); break;
-             default: break;
-         }
-         in_count--;
-         if (in_count == 0) {
-             if (gNRFData.pipe.state == PIPE_STATE_BUSY) {       
-               while (!SendSetup());
+            } // switch gState
+        } else {
+          // Count is not at ZERO
+          switch(gState) {
+            case STATE_HXHDR:
+             switch (gREAD_counter) {
+                 case 4: gWriteCmd.addrL = inch; break;
+                 case 3: gWriteCmd.addrH = inch; break;
+                 case 2: gWriteCmd.csum  = inch; break;
+                 case 1: gWriteCmd.erase = (inch == 'E'); break;
+                 default: break;
              }
-             nrf_state = NRF_STATE_W4_SETUP_ACK;
-             tty_state = TTY_STATE_NSYNC;
-         }
-         break;
-      case TTY_STATE_W4_DATA:
-         gWriteCmd.data[32-in_count] = inch;
-         in_count--;
-         if (in_count == 0) {
-             if (gNRFData.pipe.state == PIPE_STATE_BUSY) {
-                SendWrite();
+             gREAD_counter--;
+             if (gREAD_counter == 0) {
+                 SendSetup();
+                 retry_count = 0;
+                 gState = STATE_SETUP;
              }
-             nrf_state = NRF_STATE_W4_WRITE_ACK;
-             tty_state = TTY_STATE_NSYNC;
-         }
-         break;     
-      case TTY_STATE_W4_RESET:
-         in_count--;
-         if (in_count == 0) {
-             if (gNRFData.pipe.state == PIPE_STATE_BUSY) {
+             break;
+          case STATE_HXDATA:
+             gWriteCmd.data[32-gREAD_counter] = inch;
+             gREAD_counter--;
+             if (gREAD_counter == 0) {
+                 SendWrite();
+                 gState = STATE_WRITE;
+             }
+             break;
+          case STATE_RESET:
+             gREAD_counter--;
+             if (gREAD_counter == 0) {
                 SendReboot();
+                Serial.write(0x01);
+                Serial.flush();
+                gState = STATE_IDLE;
+                delay(2000);
+                splash();
+                addr_client =0;
              }
-            Serial.write(0x01);
-            Serial.flush();
-            nrf_state = NRF_STATE_IDLE;
-            tty_state = TTY_STATE_IDLE;          
-         }
-         break;
-
-      case TTY_STATE_W4_SYNC:
-         if (inch == 0x42) {
-            tty_state = TTY_STATE_NSYNC;
-            Serial.write(0x42); // Reply- we are In SYNC
-            Serial.flush();
-         } else {
-            tty_state = TTY_STATE_IDLE;
-         }
-
-      case TTY_STATE_W4_AUDIT:
-         gWriteCmd.data[7-in_count] = inch;
-         in_count--;
-         if (in_count == 0) {
-             if (gNRFData.pipe.state == PIPE_STATE_BUSY) {
-                SendAudit();
+             break;
+          case STATE_FINISH:
+             gWriteCmd.data[7-gREAD_counter] = inch;
+             gREAD_counter--;
+             if (gREAD_counter == 0) {
+                 SendAudit();
+                 gState=STATE_AUDIT; // Wait for AUDIT ACK
              }
-             nrf_state = NRF_STATE_W4_AUDIT_ACK;
-             tty_state = TTY_STATE_NSYNC;
+             break;
+          case STATE_DEVID:
+             addr_client= addr_client<<4|x2i(inch&0xFF);
+             gREAD_counter--;
+             if (gREAD_counter == 0) {
+                 // Attempt to Bind to the client
+                 gState = STATE_BIND; // Wait for BIND ACK
+                 sendBindRequest();
+             }
+             break;
+          default:
+             break;  // Invalid state
+
+          } // Switch
+        } // Else Count !=0
+      } // Not IDLE
+    } else { // No Serial Available
+       // Is Serial expected?
+       if (W4Serial(gState) && (gState != STATE_IDLE)) {
+         if (millis()-gHeartBeatTimeout > 1500) {
+           if (mode(gState) > mode(STATE_BIND)) {
+             SendHeartBeat();
+             heart_beat_count++;
+             gHeartBeatTimeout=millis();
+             lcd.setCursor(0,1);
+             lcd.print(F("- signal lost  -"));
+           }
          }
-         break;
-      default:
-         break;  // Invalid state
-      
+         if ((millis()-serial_timeout)>10000) {
+              Serial.write(0x06); // Timeout on reading from file
+              Serial.flush();
+              gState = STATE_IDLE;
+              addr_client =0;
+              lcd.setCursor(4,0);
+              lcd.print(millis()-serial_timeout);
+              splash();
+         }
+       }
     }
-  }
-  DisplayState(tty_state, nrf_state);
+  } // Should we be checking for Serial
+  DisplayState();
 }

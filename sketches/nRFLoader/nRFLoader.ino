@@ -25,7 +25,10 @@ LiquidCrystal_I2C lcd(0x27,2,1,0,4,5,6,7,3, POSITIVE);
 
 // Global Parameters ------------------------------------------
 // ------------------------------------------------------------
+#define LOG_NORMAL (0x00)
+#define LOG_VERBOSE (0x01)
 
+uint8_t gLogLevel = LOG_NORMAL;
 // For easy of copying, storing the nRF address (3 bytes) as the
 // three LSB of a uint32_t
 typedef uint32_t tDeviceId;
@@ -69,16 +72,17 @@ uint8_t gREAD_counter = 0;
 
 // STATE = W4SERIAL | W4NRF | MODE
 #define STATE_IDLE   (0x80|0x40|0x00)
-#define STATE_DEVID  (0x80|0x40|0x01)
-#define STATE_BIND   (0x00|0x40|0x02)
-#define STATE_HXHDR  (0x80     |0x03)
-#define STATE_HXDATA (0x80     |0x04)
-#define STATE_SETUP  (0x00|0x40|0x05)
-#define STATE_WRITE  (0x00|0x40|0x06)
-#define STATE_COMMIT (0x00|0x40|0x07)
-#define STATE_FINISH (0x80|0x00|0x08)
-#define STATE_AUDIT  (0x00|0x40|0x09)
-#define STATE_RESET  (0x80|0x00|0x0A)
+#define STATE_LOG    (0x80|0x40|0x01)
+#define STATE_DEVID  (0x80|0x40|0x02)
+#define STATE_BIND   (0x00|0x40|0x03)
+#define STATE_HXHDR  (0x80     |0x04)
+#define STATE_HXDATA (0x80     |0x05)
+#define STATE_SETUP  (0x00|0x40|0x06)
+#define STATE_WRITE  (0x00|0x40|0x07)
+#define STATE_COMMIT (0x00|0x40|0x08)
+#define STATE_FINISH (0x80|0x00|0x09)
+#define STATE_AUDIT  (0x00|0x40|0x0A)
+#define STATE_RESET  (0x80|0x00|0x0B)
 
 uint8_t gState = STATE_IDLE;
 #define W4Radio(x) ((x&0x40)>0)
@@ -219,14 +223,18 @@ bool SendSetup(){
         radio.startListening(); // EN_RXADDRP0 = 0
 
         lcd.setCursor(0,1);
-        //0200 Erase :.0..
-        //0123456789ABCDEF
-        dumpMsg(&(msg[2]),1);
-        dumpMsg(&(msg[1]),1);
+        if (gLogLevel == LOG_VERBOSE) {
+          //0200 Erase :.0..
+          //0123456789ABCDEF
+          dumpMsg(&(msg[2]),1);
+          dumpMsg(&(msg[1]),1);
 
-        lcd.print(" Erase  : ");
-        lcd.print(retCode);
-        lcd.print(" ");
+          lcd.print(" Erase  : ");
+          lcd.print(retCode);
+          lcd.print(" ");
+        } else {
+          lcd.print(">>>             ");
+        }
 
         return retCode;
 }
@@ -247,8 +255,10 @@ bool SendReboot() {
         gState = STATE_DEVID;
         radio.setAutoAck(0,false);
         radio.startListening();
-        lcd.setCursor(0,1);
-        lcd.print("Reset           ");
+        if (gLogLevel == LOG_VERBOSE) {
+          lcd.setCursor(0,1);
+          lcd.print("Reset           ");
+        }
         return retCode;
 }
 
@@ -268,12 +278,18 @@ bool SendWrite() {
         radio.setAutoAck(0,false);
         radio.startListening();
 
-        lcd.setCursor(5,1);
-        //0200 Write :.0..
-        //0123456789ABCDEF
-        lcd.print("Write  : ");
-        lcd.print(retCode);
-        lcd.print(" ");
+
+        if (gLogLevel == LOG_VERBOSE) {
+          lcd.setCursor(5,1);
+          //0200 Write :.0..
+          //0123456789ABCDEF
+          lcd.print("Write  : ");
+          lcd.print(retCode);
+          lcd.print(" ");
+        } else {
+          lcd.setCursor(0,1);
+          lcd.print("     >>>        ");
+        }
         return retCode;
 }
 
@@ -296,12 +312,17 @@ bool SendCommit() {
         radio.setAutoAck(0,false);
         radio.startListening();
 
-        lcd.setCursor(5,1);
-        //0200 Commit :.0.
-        //0123456789ABCDEF
-        lcd.print("Commit : ");
-        lcd.print(retCode);
-        lcd.print(" ");
+        if (gLogLevel == LOG_VERBOSE) {
+          lcd.setCursor(5,1);
+          //0200 Commit :.0.
+          //0123456789ABCDEF
+          lcd.print("Commit : ");
+          lcd.print(retCode);
+          lcd.print(" ");
+        }else {
+          lcd.setCursor(0,1);
+          lcd.print("          >>>   ");
+        }
         return retCode;
 }
 
@@ -321,9 +342,13 @@ bool SendAudit() {
 
         radio.setAutoAck(0,false);
         radio.startListening();
-
-        lcd.setCursor(0,1);
-        lcd.print("Audit..         ");
+        if (gLogLevel == LOG_VERBOSE) {
+          lcd.setCursor(0,1);
+          lcd.print("Audit..         ");
+        } else {
+          lcd.setCursor(14,1);
+          lcd.print("||");
+        }
         return retCode;
 }
 
@@ -375,10 +400,12 @@ bool sendBindRequest() {
         radio.startListening(); // EN_RXADDR_P0 = 0
 
         lcd.setCursor(0,1);
-        uint32_t tempAddr;
-        radio.qryAddrReg(0x0C,(char *)&tempAddr);
-        lcd.print(">>");
-        lcd.print(tempAddr,HEX);
+        if(gLogLevel == LOG_VERBOSE) {
+          uint32_t tempAddr;
+          radio.qryAddrReg(0x0C,(char *)&tempAddr);
+          lcd.print(">>");
+          lcd.print(tempAddr,HEX);
+        }
         return retCode;
 }
 
@@ -559,6 +586,7 @@ void DisplayState() {
 
    switch (gState) {
     case STATE_IDLE:
+    case STATE_LOG:
     case STATE_DEVID:
         lcd.print("                ");
         break;
@@ -612,7 +640,6 @@ void show_idle() {
     lcd.setCursor(phase,1);
     lcd.write(255);
 
-
     phase %=16;
 
     //
@@ -650,15 +677,20 @@ void loop() {
       if (gState==STATE_IDLE) {
            // Only thing we do is wait on the SYNC
            if (inch == 0x42){
-              gState = STATE_DEVID;
+              gState = STATE_LOG;
               Serial.write(0x42);
            }
       } else {
         if (gREAD_counter == 0) { // No data pending
           switch (gState) {
+            case STATE_LOG:
+              if (inch==0x06){
+                gREAD_counter = 1;
+              } // Intentional FALL through
             case STATE_DEVID: // Wait for type 05 record
               if (inch==0x05) {// nRF target device ID
-                    gREAD_counter = 6;
+                    gREAD_counter = 3;
+                    gState = STATE_DEVID;
                 }
                 break;
             case STATE_HXHDR: {
@@ -738,12 +770,23 @@ void loop() {
              }
              break;
           case STATE_DEVID:
-             addr_client= addr_client<<4|x2i(inch&0xFF);
+             addr_client=addr_client<<8 | (inch&0xFF);
              gREAD_counter--;
              if (gREAD_counter == 0) {
                  // Attempt to Bind to the client
                  gState = STATE_BIND; // Wait for BIND ACK
                  sendBindRequest();
+             }
+             break;
+          case STATE_LOG:
+             gLogLevel = (inch>0);
+             gREAD_counter--;
+             if (gREAD_counter == 0) {
+                 // Attempt to Bind to the client
+
+                 gState = STATE_DEVID; // Wait for BIND
+                 //Serial.write(gLogLevel+0x10);
+                 Serial.write(0x01); // Confirm message
              }
              break;
           default:

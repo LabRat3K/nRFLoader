@@ -149,12 +149,21 @@ def device_sync(ser):
     else:
         return True
 
+def device_set_verbose(ser):
+    log(LOG_VERBOSE, 'Setting Verbosity Level')
+    ser.write(bytearray([0x06,log_level]));
+
+    status = ord(ser.read(1)[0])
+    if status != STATUS_OK:
+        device_error(status)
+        return False
+    else:
+        return True
+
 def device_set_devid(ser, devid):
     log(LOG_VERBOSE, 'Searching for device id: %06x' % devid)
 
-    ser.write(bytearray([0x05]))
-    s= (hex(devid)).replace("0x","")
-    ser.write(bytearray(s))
+    ser.write(bytearray([0x05,(devid>>16)&0xFF, (devid>>8)&0xFF, devid&0xFF]))
 
     status = ord(ser.read(1)[0])
     if status != STATUS_OK:
@@ -342,6 +351,11 @@ def main(args):
         time.sleep(1)
         sys.stdout.write('.')
         sys.stdout.flush()
+
+    if log_level >= LOG_VERBOSE:
+       if not device_set_verbose(ser):
+          failed=True
+          exit_with_error(9, 'Failure to set device verbosity')
 
     if not device_set_devid(ser, devid):
         failed = True

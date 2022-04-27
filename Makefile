@@ -42,7 +42,7 @@ MDB = $(MPLABX_DIR)/mplab_ide.app/Contents/Resources/mplab_ide/bin/mdb.sh
 
 HEX = $(OUT).hex
 
-import_list.inc: export_list $(HEX)
+import_list.inc: export_list $(HEX) ./export_symbols.sh
 	./export_symbols.sh
 
 # Link

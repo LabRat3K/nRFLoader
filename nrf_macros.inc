@@ -1,9 +1,9 @@
 ; --- NRF MACROS
-; Rely on the existence of 
-;	_nrfReadReg
-;	_nrfWriteReg
-;	_nrfWriteRegEx
-; 	_nrfFlush
+; Rely on the existence of helper routines
+; function _nrfReadReg
+; function _nrfWriteReg
+; function _nrfWriteRegEx
+; function _nrfFlush
 ;
 ;
 
@@ -12,7 +12,7 @@
 ; Results returned in W
 nrfReadReg macro regId
 		movlw	regId&0x1F
-		call	_nrfReadReg
+		call	_nrfReadReg		; Call the common code
 	endm
 
 ; SYNCHRONOUS WRTIE OF A REGISTER 
@@ -21,7 +21,7 @@ nrfWriteReg macro regId, value
 		movfw	value
 		movwf	FSR1H
 		movlw	(regId&0x1F)|0x20
-		call	_nrfWriteReg
+		call	_nrfWriteReg		; Call the common code
 	endm
 
 ; SYNCHRONOUS WRTIE OF A LITTERAL INTO NRF REGISTER 
@@ -30,7 +30,7 @@ nrfWriteRegL macro regId, value
 		movlw	value
 		movwf	FSR1H
 		movlw 	(regId&0x1F)|0x20
-		call	_nrfWriteReg
+		call	_nrfWriteReg		; Call the common code
 	endm
 
 ;SYNCHRONOUS WRITE OF ACTIVATE command
@@ -38,7 +38,7 @@ nrfActivate macro value
 		movfw	value
 		movwf	FSR1H
 		movlw	0x50
-		call	_nrfWriteReg
+		call	_nrfWriteReg		; Call the common code
 	endm 
 
 ; SYNCHRONOUS MULTI-BYTE WRITE OF A REGISTER
@@ -46,26 +46,26 @@ nrfActivate macro value
 nrfWriteRegEx macro regId, srcAddr, numBytes
 		movlw	srcAddr			; Set FSR0 to the source address
 		movwf	FSR0
-		movlw	numBytes		; Set nrfByteCount to the # of bytes to transmit
-		movwf	nrfByteCount
+		movlw	numBytes
+		movwf	nrfByteCount		; Set nrfByteCount to the # of bytes to transmit
 		movlw	(regId&0x1F)|0x20 
-		call	_nrfWriteRegEx
+		call	_nrfWriteRegEx		; Call the common code
 	endm
 
 ; SYNCHRONOUS MULTI-BYTE WRITE OF A PACKET
 nrfWritePayload macro regId, srcAddr, numBytes
 		movlw	srcAddr			; Set FSR0 to the source address
 		movwf	FSR0
-		movlw	numBytes		; Set nrfByteCount to the # of bytes to transmit
-		movwf	nrfByteCount
+		movlw	numBytes
+		movwf	nrfByteCount		; Set nrfByteCount to the # of bytes to transmit
 		movlw	regId
-		call	_nrfWriteRegEx
+		call	_nrfWriteRegEx		; Call the common code
 	endm
 
 ; SYNCHRONOUS FLUSH COMMAND
 nrfFlush macro cmd
 		movlw	cmd
-		call	_nrfFlush
+		call	_nrfFlush		; Call the common code
 	endm
 
 ; SYNCHRONOUS READ OF PAYLOAD	
@@ -75,7 +75,7 @@ nrfReadPayload macro addr, size
 		movlw	size
 		movwf	nrfByteCount	; Store number of bytes to read
 	BANKSEL LATC
-		bcf		NRF_SPI_CS		; Clear the CS
+		bcf	NRF_SPI_CS		; Clear the CS
 	BANKSEL SSP1BUF
 		movlw	NRF_READ_PAYLOAD
 		movwf	SSP1BUF			; Write the READ PAYLOAD command (0x61)
@@ -83,7 +83,7 @@ nrfReadPayload macro addr, size
 	BANKSEL PIR1
 		btfss	PIR1, SSP1IF	; Loop until SPI IRQ completed
 		goto 	$-1
-		bcf		PIR1, SSP1IF	; Clear the SPI IRQ
+		bcf	PIR1, SSP1IF	; Clear the SPI IRQ
 	BANKSEL SSP1BUF
 		movfw	SSP1BUF
 		movwf	nrfStatus		; Store the returned NRF_STATUS
@@ -91,12 +91,12 @@ nrfReadPayload macro addr, size
 	BANKSEL PIR1
 		btfss	PIR1, SSP1IF	; Loop untilSPI IRQ completed
 		goto 	$-1
-		bcf		PIR1, SSP1IF	; Clear the interrupt
+		bcf	PIR1, SSP1IF	; Clear the interrupt
 	BANKSEL SSP1BUF
 		movfw 	SSP1BUF			; Read the incoming SPI byte
 		movwi	FSR0++			; Write the byte to the target address (increment for next read)
 		decfsz	nrfByteCount,f	; Decrement the count and loop if not done
 		goto 	$-9				; Jump back to clrf SSP1BUF
 	BANKSEL LATC
-		bsf		NRF_SPI_CS		; Set the CS
+		bsf	NRF_SPI_CS		; Set the CS
 	endm

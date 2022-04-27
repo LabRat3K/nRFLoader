@@ -1,3 +1,36 @@
-UNLOCK_FLASH
 APP_IRQ_HANDLER
 APP_EVENT_HANDLER
+WRITE_TO_FLASH
+UNLOCK_FLASH
+sub_calcsum
+sub_write_csum
+delay_130us
+BL_NRF_HDLR
+BL_CMD_QRY
+BL_CMD_BIND
+; MACROS SUPPOR FUNCTIONS
+_nrfReadReg
+_nrfReadRegEx
+_nrf_cmd_done
+_nrfWriteReg
+_nrfWriteRegEx
+_nrfFlush
+_nrf_cmd_setup
+; RAM Markers
+end_bank0_vars
+end_bank1_vars
+end_global_vars
+; RAM fields shared between BL and APP code
+; EEPROM (cache) fields shared between BL & APP
+rxpayload
+TXADDR
+RXADDR
+APP_MAGIC
+APP_VERSION
+START_CHL
+START_CHH
+APP_RFCHAN
+nrfTempByte
+nrfTempRX
+nrfByteCount
+nrfStatus

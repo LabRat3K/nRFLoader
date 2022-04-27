@@ -71,7 +71,7 @@
 ; System definitions - Users should not be messing below this line.
 ; (I know you will.. we always do)
 ;
-#define BOOTLOADER_VERSION 0x03 ; <Major>.<Minor> release
+#define BOOTLOADER_VERSION 0x04 ; <Major>.<Minor> release
 #define CLOCKRATE 32000000
 #define PAYLOAD_SIZE 32
 
@@ -79,21 +79,33 @@
 ; Bank 0 Memory : 80 bytes
 ; --------------------------
  CBLOCK 0x20
-		rxpayload:PAYLOAD_SIZE	; Values read from NRF Packet
-		TXADDR:3				; Used During Device Init
+		; Values read from NRF Packet
+		rxpayload:PAYLOAD_SIZE
+		; Used During Device Init
+		TXADDR:3
 	; -- The follow block is a cached copy from the EEPROM
-		RXADDR:3				; [0-2] Device ID - 24-bit unique identifier
-		DEVTYPE					; [3]Device Type 0=16F1823 1=16f1825
-		BL_VERSION				; [4]Bootloader Version
-		APP_MAGIC				; [5]Application Identifier
-		APP_VERSION				; [6]Application Version Identifier
-		START_CHL				; [7]Configuration Parameter
-		START_CHH				; [8]
-		APP_SIZEL				; [9]Filespace 0x200.. Checksum Range
-		APP_SIZEH				; [10]Note: 16 word ROWS for checksum calc
-		APP_CSUML				; [11]16-bit checksum value
-		APP_CSUMH				; [12]
-                APP_RFCHAN				; [13] NRF RF CHAN config parameter
+		; [0-2] Device ID - 24-bit unique identifier
+		RXADDR:3
+		; [3]Device Type 0=16F1823 1=16f1825
+		DEVTYPE
+		; [4]Bootloader Version
+		BL_VERSION
+		; [5]Application Identifier
+		APP_MAGIC
+		; [6]Application Version Identifier
+		APP_VERSION
+		; [7]..[8] Configuration Parameter
+		START_CHL
+		START_CHH
+ 		; [9]..[10]Filespace 0x200.. Checksum Range
+ 		; Note: 16 word ROWS for checksum calc
+		APP_SIZEL
+		APP_SIZEH
+ 		; [11]..[12] 16-bit checksum value
+		APP_CSUML
+		APP_CSUMH
+		; [13] NRF RF CHAN config parameter
+                APP_RFCHAN
 		end_bank0_vars:0
  ENDC
  if end_bank0_vars > 0x6F
@@ -114,27 +126,31 @@
 ; Global Bank Memory : 16 bytes (all banks)
 ; --------------------------
  CBLOCK 0x70
+  		; Common memory page
 		; Debugger uses 0x70 - put a dummy value here for now.
 		dummyData
-  		; Common memory page
-		nrfTempByte		; local variable to hold value being written to the NRF register
-		nrfByteCount	; count bytes in the tx or rx transaction
-		nrfStatus		; local copy of the nrf STATUS register
+
+		; local variable to hold value being written to the NRF register
+		nrfTempByte
+		; count bytes in the tx or rx transaction
+		nrfByteCount
+		; local copy of the nrf STATUS register
+		nrfStatus
 
 		BL_TEMP
 		BL_CMD
 		BL_CALC_SUML	; Working copy of the checksum
 		BL_CALC_SUMH	; Should SUM to 0x0000 when completed
-		BL_SIZE_L		; Working copy that can be decremented until 0
+		BL_SIZE_L	; Working copy that can be decremented until 0
 		BL_SIZE_H
 		BL_WAIT_COUNT	; Countdown value as boot loader determines when to
-						; test/launch the APPLICATION
+				; test/launch the APPLICATION
 
 		nrfTempAA
 		nrfTempRX
-        end_global_vars:0
+        end_bank_global_vars:0
  ENDC
- if end_global_vars > 0x7F
+ if end_bank_global_vars > 0x7F
 	error "Global Variable Space overrun"
  endif
 
@@ -145,7 +161,7 @@
  CBLOCK 0x2000
 		; This is a linear mapping of all 112 bytes (80 + 32)
  ENDC
- if end_global_vars > 0x29AF
+ if end_bank_global_vars > 0x29AF
 	error "Linear Map Variable Space overrun"
  endif
 
@@ -160,6 +176,7 @@
 ; ==================
  	ORG 0x000
         clrf PCLATH
+
         goto BL_INIT
 
  	ORG 0x004
@@ -182,32 +199,36 @@ BL_MAIN_LOOP
 		; Count # times TMR1 rolls over, then do an audit
 		btfss	PIR1,TMR1IF
 		goto	_check_nrf_network
-		bcf		PIR1,TMR1IF
+
+		bcf	PIR1,TMR1IF
 		decfsz	BL_WAIT_COUNT,F
 		goto	_check_nrf_network
 	; Timeout
 		call	sub_bl_audit		; Call the CSUM routine
-		btfss	WREG,0				; WREG contains result of the AUDIT
+		btfss	WREG,0			; WREG contains result of the AUDIT
 		goto	BL_CMD_RESET 		;    1=CSUM failure... reset and try again
 		goto	APP_EVENT_HANDLER 	;    0=CSUM pass...hand off the APPLICATION
 
 _check_nrf_network
+		call	BL_NRF_HDLR
+		goto	BL_MAIN_LOOP
+BL_NRF_HDLR
 		nrfReadReg NRF_STATUS	; BSR=2
 	; WARNING - this method is *NOT* the proper way. Race condition can result
 	; in this bit not being set. Instead need to check if the pipe# (se arduino RF24.cpp)
-		movwf	nrfStatus		; POLL  NRF for the Rx of payload
+		movwf	nrfStatus	; POLL  NRF for the Rx of payload
 		btfss	nrfStatus,6
-		goto	BL_MAIN_LOOP    ; Repeat Ad Absurdum.
+		retlw	0x00		; Repeat Ad Absurdum.
 
 	; NRF Packet has been received in the queue
 		nrfReadPayload rxpayload, PAYLOAD_SIZE	; Read the 32 byte payload
-		nrfWriteRegL NRF_STATUS, 0x40			; Clear the RX interrupt flags
+		nrfWriteRegL NRF_STATUS, 0x40		; Clear the RX interrupt flags
 		; Check the pipe index was 0x01
 		lsrf	nrfStatus,w
 		andlw	0x07 			; w contains the pipe index...
 								; only receive on Pipe 1 - ignore others
 		decfsz	WREG,W
-		goto	BL_MAIN_LOOP	; Continue listening
+		retlw	0x01			; Continue listening
 
 	; Appears to be a valid BL packet - reset the timer counter
 		clrf	BL_WAIT_COUNT
@@ -217,7 +238,8 @@ _check_nrf_network
 		movfw	rxpayload
 		andlw	0xF0
 		xorlw	0x80
-		bnz		BL_MAIN_LOOP	; Invalid content.. ignore packet and keep listening
+		btfss	STATUS,Z
+		retlw	0x02			; Invalid content.. ignore packet and keep listening
 
 		movfw	rxpayload		; Loop at the lower nibble to determine payload type
 		clrf	PCLATH 			; Note: JUMP table - must be kept in the same code page
@@ -245,17 +267,17 @@ BL_CMD_BIND
 		movfw   RXADDR          ; Test Byte 0
 		xorwf   rxpayload+1,W
 		btfss   STATUS,Z  ; if matched, keep going
-		goto    BL_MAIN_LOOP
+		retlw	0x00
 
 		xorwf   RXADDR+1,W      ; Test Byte 1
 		xorwf   rxpayload+2,W
 		btfss   STATUS,Z  ; if matched, keep going
-		goto    BL_MAIN_LOOP
+		retlw	0x00
 
 		xorwf   RXADDR+2,W      ; Test Byte 2
 		xorwf   rxpayload+3,W
 		btfss   STATUS,Z  ; Addressed to me?
-		goto    BL_MAIN_LOOP
+		retlw	0x00
 
 		; All three matched, use the P2P address
 		nrfWriteRegEx NRF_RX_ADDR_P0, rxpayload+4, 3
@@ -265,7 +287,7 @@ BL_CMD_BIND
     ;  Server is ready (or is it the radio isn't ready?)
 		call 	delay_130us
 
-		bsf		nrfTempAA,1
+		bsf	nrfTempAA,1
 		nrfWriteReg NRF_EN_AA, nrfTempAA  ; BSR=2
 		goto	_reply_ack ;P2P confirmation BL_MAIN_LOOP
 
@@ -324,31 +346,31 @@ _csum_loop
 		movwf	EECON1
 		NOP
 		NOP
-		movfw	EEDATL				; Read LOW value of word at EEADR
+		movfw	EEDATL			; Read LOW value of word at EEADR
 		addwf	BL_CALC_SUML,F		; Add to CSUM - handling roll over
 		btfsc	STATUS,C
 		incf	BL_CALC_SUMH,F
-		movfw	EEDATH				; Add HIGH value of word at EEADR
+		movfw	EEDATH			; Add HIGH value of word at EEADR
 		addwf	BL_CALC_SUMH,F
 
-		incf	EEADRL,F			; Increment EEADR to next WORD
+		incf	EEADRL,F		; Increment EEADR to next WORD
 		btfsc	STATUS,Z
 		incf	EEADRH,F
 
-		movfw	BL_SIZE_L			; Decrement the WORD count
-		btfsc	STATUS,Z  			; Check the carry bit
+		movfw	BL_SIZE_L		; Decrement the WORD count
+		btfsc	STATUS,Z  		; Check the carry bit
 		decf	BL_SIZE_H,F
 		decf	BL_SIZE_L,F
 
-		movfw	BL_SIZE_L			; Check if both SIZEL & SIZEH are zero
+		movfw	BL_SIZE_L		; Check if both SIZEL & SIZEH are zero
 		iorwf	BL_SIZE_H, W 		; by ORing the 2 bytes into W
-		btfss	STATUS,Z	 		; and check for Z bit
+		btfss	STATUS,Z	 	; and check for Z bit
 		goto	_csum_loop
 
 		; Finished looping through CODE space
 		movfw	BL_CALC_SUMH		; Similar - OR the CSUMH&CSUML
-		iorwf	BL_CALC_SUML,W		;	0  = CSUM passed
-		return						;   !0 = CSUM failed
+		iorwf	BL_CALC_SUML,W		;   0  = CSUM passed
+		return				;   !0 = CSUM failed
 
 ;;----------.
 BL_CMD_RESET
@@ -356,10 +378,10 @@ BL_CMD_RESET
 	; 0x86
 	;
 #ifdef DISABLE_RESET
-	goto	BL_MAIN_LOOP
+	retlw	0x00
 #else
-		nop   ; Debug - somewhere for a break point
-		reset
+	nop   ; Debug - somewhere for a break point
+	reset
 #endif
 
 
@@ -511,7 +533,7 @@ _bl_reply	; Send the ACK packet back to the server
 	BANKSEL rxpayload
 			; This is a P2P message, so enable AutoAck for PIPE0
 		movwf	rxpayload+1
-		bsf		nrfTempAA,0
+		bsf	nrfTempAA,0
 		nrfWriteReg NRF_EN_AA, nrfTempAA ;nrfTempByte  ; BSR=2
 		goto	SEND_PAYLOAD	; Re-use a common SEND routine
 
@@ -531,12 +553,13 @@ BL_INIT
 	BANKSEL LATC
 		clrf	LATA				; All LATA Pins off
 		clrf	LATC
-		bsf		NRF_SPI_CS			; Default to HIGH (active LOW)
-		bcf		NRF_CE				; NRF CE - standby mode
+		bsf		NRF_SPI_CS		; Default to HIGH (active LOW)
+		bcf		NRF_CE			; NRF CE - standby mode
 
 	; BANK 1 Register INIT
 	BANKSEL WDTCON
-	;	bcf		WDTCON,0			; turn off WDT ; We are going to want a Watchdog here, to ensure recovery of failing devices
+	;	bcf		WDTCON,0		; turn off WDT
+	; We are going to want a Watchdog here, to ensure recovery of failing devices
 		movlw	0xF0				; setup internal oscillator
 		movwf	OSCCON				; 32Mhz (8Mhz internal oscillator, 4xPLL )
 		movfw	OSCSTAT
@@ -564,8 +587,8 @@ BL_INIT
 		movlw	0x01				; Go for divide by 8 = 4Mhz clock
 		movwf	SSP1ADD
 
-       	movlw   0x2A				; Mode 0,0 = CKE=1 CKP=0
-       	movwf   SSP1CON1			; Select SPI clock and enable SSP
+		movlw   0x2A				; Mode 0,0 = CKE=1 CKP=0
+		movwf   SSP1CON1			; Select SPI clock and enable SSP
 
 	; --- RAM Init section ------
 		; copy EEPROM data to RAM Cache
@@ -582,7 +605,7 @@ BL_INIT
 		; Set AUTO_ACK, 0x00 - no P2P setup yet
 		nrfWriteReg NRF_EN_AA, nrfTempAA ; nrfTempByte
 
-		; Set Data Rate - 2MBPS & HIGH Power
+		; Set Data Rate - 2MBPS(default) & HIGH Power
 		nrfReadReg NRF_RF_SETUP	; Results left in W
 		iorlw	0x06
 		movwf	nrfTempByte
@@ -620,7 +643,9 @@ BL_INIT
 		nrfWriteRegEx NRF_RX_ADDR_P1, RXADDR, 3
 
 		; Setup max number of retries
-		nrfWriteReg	NRF_SETUP_RETR, 0x0F
+		nrfWriteRegL	NRF_SETUP_RETR, 0x0F
+		call	BL_CMD_QRY
+		goto	BL_MAIN_LOOP
 
 	;--- End of NRF Register INIT ------
 
@@ -643,7 +668,7 @@ BL_CMD_QRY
 		movwf	rxpayload+(BL_VERSION-RXADDR)
 SEND_PAYLOAD
 	BANKSEL LATA
-		bcf		NRF_CE
+		bcf	NRF_CE
 
 	; Turn on Radio in Tx Mode
 		nrfReadReg NRF_CONFIG	; Results left in W
@@ -657,7 +682,7 @@ SEND_PAYLOAD
 
 	; Enable RXADDR for Pipe0 & 1
 		movlw 0x03
-		movwf nrfTempRX
+		iorwf nrfTempRX,F
 		nrfWriteReg NRF_EN_RXADDR, nrfTempRX
 
 		nrfWritePayload 0xA0, rxpayload,PAYLOAD_SIZE
@@ -667,7 +692,7 @@ _triggerXmit
 		nrfWriteRegL NRF_STATUS, 0x70 ; BSR=2
 
 	; NRF requires CE for at least 10us
-		bsf		NRF_CE	; Enable Transmitter
+		bsf	NRF_CE	; Enable Transmitter
 
 		movlw	32		; Scoped at 12 us
 		decfsz	WREG,f	; 8 instructions to make a 10us spin (@ 32Mhz)
@@ -710,7 +735,7 @@ _ack_done
 		;Start receiving
 		bsf		NRF_CE 			; From standby into Listening Mode
 		call 	delay_130us
-		goto	BL_MAIN_LOOP
+		retlw	0x00
 
 delay_130us
 		movlw 	216		; 208=130us, 216=136us
@@ -726,7 +751,8 @@ delay_130us
 ; ------------------------------------------------------------
 ; NRF/SPI read/write routines
 ; ------------------------------------------------------------
-_nrfReadReg ; W contains register to read
+; W contains register to read
+_nrfReadReg
 		call	_nrf_cmd_setup
 	BANKSEL SSP1BUF
 		clrf	SSP1BUF			; Write 0x00 in order to clock out another byte
@@ -741,7 +767,8 @@ _nrf_cmd_done
 		return
 
 ; ----
-_nrfWriteReg ; W- contains regId, FSR1 points to the value to write
+; W- contains regId, FSR1 points to the value to write
+_nrfWriteReg
 		call	_nrf_cmd_setup
 	BANKSEL SSP1BUF
 		movfw	FSR1H			; Now clock out the parameter byte
@@ -750,12 +777,14 @@ _nrfWriteReg ; W- contains regId, FSR1 points to the value to write
 		goto	_nrf_cmd_done
 
 ; ----
-_nrfFlush ; W has the command to send
+; W has the command to send
+_nrfFlush
 		call	_nrf_cmd_setup
 		goto	_nrf_cmd_done
 
 ; ----
-_nrfWriteRegEx ; W contains the regId, FSR0 the srcAddr, and nrfByteCount the numBytes
+; W contains the regId, FSR0 the srcAddr, and nrfByteCount the numBytes
+_nrfWriteRegEx
 		call	_nrf_cmd_setup
 	; Time to clock out the bytes
 	BANKSEL SSP1BUF
@@ -782,7 +811,7 @@ _nrf_cmd_setup
 	BANKSEL PIR1
 		btfss	PIR1, SSP1IF	; Loop until SPI IRQ completed
 		goto 	$-1
-		bcf		PIR1, SSP1IF	; Clear the interrupt flag
+		bcf	PIR1, SSP1IF	; Clear the interrupt flag
 	return
 
 ; ------------------------------------------------------------
@@ -818,6 +847,7 @@ sub_write_csum
 		movlw   (APP_SIZEL-RXADDR) ; Offset in the EEPROM
 		movwf	EEADRL
 sub_write_csum_loop
+WRITE_TO_FLASH
 		moviw	FSR0++
 		movwf	EEDATL
 

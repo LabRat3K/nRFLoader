@@ -267,17 +267,17 @@ BL_CMD_BIND
 		movfw   RXADDR          ; Test Byte 0
 		xorwf   rxpayload+1,W
 		btfss   STATUS,Z  ; if matched, keep going
-		retlw	0x00
+		retlw	0x02
 
 		xorwf   RXADDR+1,W      ; Test Byte 1
 		xorwf   rxpayload+2,W
 		btfss   STATUS,Z  ; if matched, keep going
-		retlw	0x00
+		retlw	0x02
 
 		xorwf   RXADDR+2,W      ; Test Byte 2
 		xorwf   rxpayload+3,W
 		btfss   STATUS,Z  ; Addressed to me?
-		retlw	0x00
+		retlw	0x02
 
 		; All three matched, use the P2P address
 		nrfWriteRegEx NRF_RX_ADDR_P0, rxpayload+4, 3
@@ -711,7 +711,7 @@ w4ack
 		btfss	WREG,4  ; MAX_RT flag
 		goto	w4ack
 
-_handle_msx_rt
+_handle_max_rt
 		bsf		WREG,4 ; Write a 1 to clear the bit
 		movwf	nrfTempByte
 		nrfWriteReg NRF_STATUS, nrfTempByte
@@ -727,15 +727,15 @@ _ack_done
 		nrfWriteReg NRF_CONFIG, nrfTempByte ; BSR=2
 
 		; Disable RXADDR for Pipe0
-		bcf	nrfTempRX,0
-		nrfWriteReg NRF_EN_RXADDR, nrfTempRX
+;		bcf	nrfTempRX,0
+;		nrfWriteReg NRF_EN_RXADDR, nrfTempRX
 
 		nrfWriteRegL NRF_STATUS, 0x20	; Clear the TX_DS bit
 
 		;Start receiving
 		bsf		NRF_CE 			; From standby into Listening Mode
 		call 	delay_130us
-		retlw	0x00
+		retlw	0x04
 
 delay_130us
 		movlw 	216		; 208=130us, 216=136us

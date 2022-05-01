@@ -2,13 +2,16 @@ APP_IRQ_HANDLER
 APP_EVENT_HANDLER
 WRITE_TO_FLASH
 UNLOCK_FLASH
+_read_eeprom
 sub_calcsum
 sub_write_csum
 delay_130us
 BL_NRF_HDLR
 BL_CMD_QRY
 BL_CMD_BIND
-; MACROS SUPPOR FUNCTIONS
+_reply_ack
+_reply_nack
+; MACROS SUPPORT FUNCTIONS
 _nrfReadReg
 _nrfReadRegEx
 _nrf_cmd_done
@@ -34,3 +37,4 @@ nrfTempByte
 nrfTempRX
 nrfByteCount
 nrfStatus
+BL_TEMP

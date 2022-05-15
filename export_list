@@ -28,6 +28,7 @@ end_global_vars
 rxpayload
 TXADDR
 RXADDR
+BL_VERSION
 APP_MAGIC
 APP_VERSION
 START_CHL

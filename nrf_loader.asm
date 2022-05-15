@@ -213,7 +213,7 @@ _check_nrf_network
 		call	BL_NRF_HDLR
 		goto	BL_MAIN_LOOP
 BL_NRF_HDLR
-		nrfReadReg NRF_STATUS	; BSR=2
+		nrfReadReg NRF_STATUS	; BSR=0
 	; WARNING - this method is *NOT* the proper way. Race condition can result
 	; in this bit not being set. Instead need to check if the pipe# (se arduino RF24.cpp)
 		movwf	nrfStatus	; POLL  NRF for the Rx of payload

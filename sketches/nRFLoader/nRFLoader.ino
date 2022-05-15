@@ -74,15 +74,16 @@ uint8_t gREAD_counter = 0;
 #define STATE_IDLE   (0x80|0x40|0x00)
 #define STATE_LOG    (0x80|0x40|0x01)
 #define STATE_DEVID  (0x80|0x40|0x02)
-#define STATE_BIND   (0x00|0x40|0x03)
-#define STATE_HXHDR  (0x80     |0x04)
-#define STATE_HXDATA (0x80     |0x05)
-#define STATE_SETUP  (0x00|0x40|0x06)
-#define STATE_WRITE  (0x00|0x40|0x07)
-#define STATE_COMMIT (0x00|0x40|0x08)
-#define STATE_FINISH (0x80|0x00|0x09)
-#define STATE_AUDIT  (0x00|0x40|0x0A)
-#define STATE_RESET  (0x80|0x00|0x0B)
+#define STATE_SEARCH (0x00|0x40|0x03)
+#define STATE_BIND   (0x00|0x40|0x04)
+#define STATE_HXHDR  (0x80     |0x05)
+#define STATE_HXDATA (0x80     |0x06)
+#define STATE_SETUP  (0x00|0x40|0x07)
+#define STATE_WRITE  (0x00|0x40|0x08)
+#define STATE_COMMIT (0x00|0x40|0x09)
+#define STATE_FINISH (0x80|0x00|0x0A)
+#define STATE_AUDIT  (0x00|0x40|0x0B)
+#define STATE_RESET  (0x80|0x00|0x0C)
 
 uint8_t gState = STATE_IDLE;
 #define W4Radio(x) ((x&0x40)>0)
@@ -90,7 +91,7 @@ uint8_t gState = STATE_IDLE;
 #define mode(x)    (x&0x0F)
 
 #define major 0
-#define minor 2
+#define minor 3
 
 // Eye Candy - idle display
 char info_line[17];   // Text on 2nd line (changes every 2 seconds)
@@ -352,6 +353,33 @@ bool SendAudit() {
         return retCode;
 }
 
+uint32_t last_beacon =0;
+bool sendBeacon() {
+  uint8_t * msg = gNRF_message;
+  bool retCode = false;
+  uint32_t now = millis();
+  if (now-last_beacon>1000) {
+        last_beacon= now;
+        msg[0] = 0x85;
+        msg[2] = millis()&0xff; // ensure unique packets
+
+        radio.stopListening();
+        radio.openWritingPipe(addr_server);
+        delay(1);
+        radio.setAutoAck(0,false);  // Should already be false
+
+        gWaitTimeout=millis();
+        retCode = radio.write(msg,32);
+
+        radio.openWritingPipe(addr_client);
+        radio.startListening();
+  } else {
+    retCode =true;
+  }
+  return retCode;
+}
+
+
 bool SendHeartBeat() {
   uint8_t * msg = gNRF_message;
   bool retCode = false;
@@ -396,6 +424,7 @@ bool sendBindRequest() {
         //delay(500);
         retCode = radio.write(msg,32); // Want to get AA working here
 
+        radio.openWritingPipe(addr_client);
         radio.setAutoAck(2,true);// From now on ... BOUND to P2P
         radio.startListening(); // EN_RXADDR_P0 = 0
 
@@ -444,17 +473,31 @@ uint8_t pollRadio () {
 
     switch (gState) {
       case STATE_IDLE:
-        // If I see an 0x88 .. add to scrolling list
         if (inbuf[0] == 0x88) { // This is a BIND request
-          // Display for giggles
-          // Display String -
+          // To Do .. add a scrolling marquee showing device id's
+        }
+        break;
+      case STATE_SEARCH:
+        if (inbuf[0] == 0x88) { // This is a BIND request
+          // Is this the device I am waiting for?
+          uint32_t * tempAddr= (uint32_t *) &(inbuf[1]);
+          if ((*tempAddr&0xFFFFFF) == addr_client) {
+            // Device Was heard...
+            sendBindRequest();
+            gState = STATE_BIND;
+          }
         }
         break;
       case STATE_BIND:
         if (inbuf[0] == 0x88) { // This is a BIND request
-          // Display for giggles
-          sendBindRequest(); // Broadcast BOUND request
+           // Display for giggles
+           uint32_t * tempAddr= (uint32_t *) &(inbuf[1]);
+           if ((*tempAddr&0xFFFFFF) == addr_client) {
+              // Device Was heard...
+              sendBindRequest();
+            }
         }
+
         if (inbuf[0] == 0x87) { // This is a BIND reply
           gState = STATE_HXHDR;
           radio.openWritingPipe(addr_client);
@@ -530,7 +573,12 @@ uint8_t pollRadio () {
      if (W4Radio(gState)) {
         if (gState!=STATE_IDLE) {
            // If failure to hear back after 5 retries
-           if (retry_count > 5) {
+           uint8_t RETRY_LIMIT = 5;
+
+           if (gState == STATE_SEARCH) {
+              RETRY_LIMIT = 10;
+           }
+           if (retry_count > RETRY_LIMIT) {
             // Exit with error
             idleRadio();
             addr_client =0;
@@ -547,6 +595,9 @@ uint8_t pollRadio () {
 
            if (millis()-gWaitTimeout > 1000) {
              switch (gState) {
+                case STATE_SEARCH:
+                  sendBeacon();
+                  break;
                 case STATE_BIND:
                   sendBindRequest();
                   break;
@@ -590,9 +641,20 @@ void DisplayState() {
     case STATE_DEVID:
         lcd.print("                ");
         break;
+    case STATE_SEARCH: {
+       char temp[17];
+          lcd.print("Searching  ");
+               //nRF:56789ABCDE
+          lcd.setCursor(0,1);
+          sprintf(temp," device: %6.6lX ",addr_client);
+          //0123456789ABCDEF
+          // device: 1D0002
+          lcd.print(temp);
+       }
+       break;
     case STATE_BIND:{
           char temp[17];
-          lcd.print("Searching  ");
+          lcd.print("BINDING...  ");
                //nRF:56789ABCDE
           lcd.setCursor(0,1);
           sprintf(temp," device: %6.6lX ",addr_client);
@@ -717,6 +779,7 @@ void loop() {
                      Serial.write(0x02);
                      gState = STATE_IDLE;
                      splash();
+                     idleRadio();
                      break;
                 }// switch (inch)
                 break;
@@ -756,6 +819,7 @@ void loop() {
                 Serial.write(0x01);
                 Serial.flush();
                 gState = STATE_IDLE;
+                idleRadio();
                 delay(2000);
                 splash();
                 addr_client =0;
@@ -774,8 +838,9 @@ void loop() {
              gREAD_counter--;
              if (gREAD_counter == 0) {
                  // Attempt to Bind to the client
-                 gState = STATE_BIND; // Wait for BIND ACK
-                 sendBindRequest();
+                 gState = STATE_SEARCH; // Wait for Device Reply
+                 sendBeacon();
+                 //sendBindRequest();
              }
              break;
           case STATE_LOG:
@@ -784,7 +849,7 @@ void loop() {
              if (gREAD_counter == 0) {
                  // Attempt to Bind to the client
 
-                 gState = STATE_DEVID; // Wait for BIND
+                 gState = STATE_DEVID; // Wait for DEVICE_ID
                  //Serial.write(gLogLevel+0x10);
                  Serial.write(0x01); // Confirm message
              }
@@ -811,6 +876,7 @@ void loop() {
               Serial.write(0x06); // Timeout on reading from file
               Serial.flush();
               gState = STATE_IDLE;
+              idleRadio();
               addr_client =0;
               lcd.setCursor(4,0);
               lcd.print(millis()-serial_timeout);

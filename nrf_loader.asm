@@ -380,7 +380,6 @@ BL_CMD_RESET
 #ifdef DISABLE_RESET
 	retlw	0x00
 #else
-	nop   ; Debug - somewhere for a break point
 	reset
 #endif
 
@@ -661,11 +660,12 @@ BL_CMD_QRY
 		clrf	FSR0H
 		movlw	LOW rxpayload+1
 		movwf	FSR0L
-		call	_read_eeprom
+		call	_read_eeprom	; BSR=3
 		; Enqueue the payload in the Tx Register
 		; Place BootLoader version from CODE in the message
+	BANKSEL rxpayload
 		movlw	BOOTLOADER_VERSION
-		movwf	rxpayload+(BL_VERSION-RXADDR)
+		movwf	rxpayload+(BL_VERSION-RXADDR)+1
 SEND_PAYLOAD
 	BANKSEL LATA
 		bcf	NRF_CE

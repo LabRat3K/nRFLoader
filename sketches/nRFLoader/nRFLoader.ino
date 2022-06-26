@@ -1,9 +1,10 @@
-// nRFLoader - a sketch to enable OTA upgrade of devices running the nRFLoader bootloader
+// nRFLoader - a sketch for testing nRF24 modules, and to enable
+// OTA upgrade of devices running the nRFLoader bootloader
 //
 // (c) 2022, Andrew Williams
 // -------------------------
-// Hardware Setup - I2C connection to a 2x16 LCD
-// and an ESP24L01 Radio connected to SPI and pins 9&10
+// Hardware Setup - Uses and LCDKEYPAD with a 2x16 LCD
+// and an ESP24L01 Radio connected to SPI and pins 3&2
 // Serial Port: Baud 115200
 // ----------------------------------------------------
 #include <SPI.h>
@@ -12,15 +13,43 @@
 
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+// For unknown reasons, typedef structures must come from external .h file
+#include "lcd_menu.h"
 
-// Configuration Parameters
+// Serial Configuration ====
+// =========================
 #define BAUDRATE (115200)
 
-// Hardware configuration:
-// Set up nRF24L01 radio on SPI bus plus pins 9 & 10
-RF24 radio(9,10);
-// I2C LCD adapter
-LiquidCrystal_I2C lcd(0x27,2,1,0,4,5,6,7,3, POSITIVE);
+// nRF Radio Hardware configuration ====
+// on SPI bus plus pins 9 & 10
+// =====================================
+RF24 radio(3,2);
+
+
+// LCD Hardware configuration ====
+// ===============================
+#ifdef USE_I2C_LCD
+  #include <LiquidCrystal_I2C.h>
+  // I2C LCD adapter
+  LiquidCrystal_I2C lcd(0x27,2,1,0,4,5,6,7,3, POSITIVE);
+#else
+  #include <LiquidCrystal.h>
+  const int rs = 8, en = 9, d4 = 4, d5 = 5, d6 = 6, d7 = 7;
+  LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+#endif
+
+
+// Macro to clear existing line on the LCD
+#define clearLine() lcd.print("                ");
+
+// Keypad Driver ====
+// using the Labrat's Lights Keypad Driver
+// ==================
+#include <LRL_Key.h>
+static LRL_Key keypad;
+#define getkey() keypad.getKey()
+
+
 
 
 // Global Parameters ------------------------------------------
@@ -28,8 +57,15 @@ LiquidCrystal_I2C lcd(0x27,2,1,0,4,5,6,7,3, POSITIVE);
 #define LOG_NORMAL (0x00)
 #define LOG_VERBOSE (0x01)
 
+#define LED_GREEN (A1)
+#define LED_BLUE  (A2)
+#define LED_AMBER (A3)
+
+
+// gGlobal Variables
+//
 uint8_t gLogLevel = LOG_NORMAL;
-// For easy of copying, storing the nRF address (3 bytes) as the
+// For ease of copying, storing the nRF address (3 bytes) as the
 // three LSB of a uint32_t
 typedef uint32_t tDeviceId;
 
@@ -45,6 +81,23 @@ uint8_t gNRF_message[32];
 // Timestamp for any timeout event
 unsigned long gWaitTimeout=0;
 unsigned long gHeartBeatTimeout=0;
+
+tSelectItem cRFRateMenu[] = {
+  {"1Mbps",0},
+  {"2Mbps",1}
+};
+uint8_t indexRFRate= 0;
+
+tSelectItem cRFChanMenu[] = {
+  {"2470         ",70},
+  {"2472         ",72},
+  {"2474         ",74},
+  {"2476         ",76},
+  {"2478         ",78},
+  {"2480 (Legacy)",80},
+  {"2482         ",82}
+};
+uint8_t indexRFChan = 6; // Default to 2482
 
 // A firmware write takes 3 nRF messages to complete (setup/write/bind)
 // This structure maintains a cached copy of the transaction, in case
@@ -74,16 +127,15 @@ uint8_t gREAD_counter = 0;
 #define STATE_IDLE   (0x80|0x40|0x00)
 #define STATE_LOG    (0x80|0x40|0x01)
 #define STATE_DEVID  (0x80|0x40|0x02)
-#define STATE_SEARCH (0x00|0x40|0x03)
-#define STATE_BIND   (0x00|0x40|0x04)
-#define STATE_HXHDR  (0x80     |0x05)
-#define STATE_HXDATA (0x80     |0x06)
-#define STATE_SETUP  (0x00|0x40|0x07)
-#define STATE_WRITE  (0x00|0x40|0x08)
-#define STATE_COMMIT (0x00|0x40|0x09)
-#define STATE_FINISH (0x80|0x00|0x0A)
-#define STATE_AUDIT  (0x00|0x40|0x0B)
-#define STATE_RESET  (0x80|0x00|0x0C)
+#define STATE_BIND   (0x00|0x40|0x03)
+#define STATE_HXHDR  (0x80     |0x04)
+#define STATE_HXDATA (0x80     |0x05)
+#define STATE_SETUP  (0x00|0x40|0x06)
+#define STATE_WRITE  (0x00|0x40|0x07)
+#define STATE_COMMIT (0x00|0x40|0x08)
+#define STATE_FINISH (0x80|0x00|0x09)
+#define STATE_AUDIT  (0x00|0x40|0x0A)
+#define STATE_RESET  (0x80|0x00|0x0B)
 
 uint8_t gState = STATE_IDLE;
 #define W4Radio(x) ((x&0x40)>0)
@@ -91,7 +143,10 @@ uint8_t gState = STATE_IDLE;
 #define mode(x)    (x&0x0F)
 
 #define major 0
-#define minor 3
+#define minor 2
+
+// Preventing Double reading of keypresses
+int last_key = KEY_NONE;
 
 // Eye Candy - idle display
 char info_line[17];   // Text on 2nd line (changes every 2 seconds)
@@ -106,6 +161,8 @@ void splash() {
   lcd.setCursor(0,0);
   lcd.print(F("_nRF  WHISPERER_"));
   sprintf(info_line," LabRat  Lights ");
+  lcd.setCursor(0,1);
+  lcd.print(info_line);
 }
 
 // void idleRadio()
@@ -157,7 +214,14 @@ byte Heart2[] = {
   B00000
 };
 
+byte BAR2[] = { B00000, B00000, B00000, B00000, B00000, B00000, B11111, B11111};
+byte BAR3[] = { B00000, B00000, B00000, B00000, B00000, B11111, B11111, B11111};
+byte BAR4[] = { B00000, B00000, B00000, B00000, B11111, B11111, B11111, B11111};
+byte BAR5[] = { B00000, B00000, B00000, B11111, B11111, B11111, B11111, B11111};
+byte BAR6[] = { B00000, B00000, B11111, B11111, B11111, B11111, B11111, B11111};
+byte BAR7[] = { B00000, B11111, B11111, B11111, B11111, B11111, B11111, B11111};
 
+uint8_t barmap[9] = {0x20, 0x5F,0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0xFF}; // 0x00 -> 8 bars (9 entries)
 // ---------------
 // Arduino Setup :
 // ---------------
@@ -173,10 +237,16 @@ void setup() {
   lcd.setBacklight(HIGH);
   lcd.createChar(0, Heart);  // Blinking Heart Icon
   lcd.createChar(1, Heart2);
+  lcd.createChar(2, BAR2);
+  lcd.createChar(3, BAR3);
+  lcd.createChar(4, BAR4);
+  lcd.createChar(5, BAR5);
+  lcd.createChar(6, BAR6);
+  lcd.createChar(7, BAR7);
   splash();
 
   // Default gRFchan - update to be an option to be passed in.
-  gRFchan=82;
+  gRFchan=cRFChanMenu[indexRFChan].value;
   addr_client = 0x00;
   gState = STATE_IDLE;
 
@@ -216,7 +286,7 @@ bool SendSetup(){
         // Send the message
         radio.stopListening(); // Ready to Write - EN_RXADDRP0 = 1
         radio.setAutoAck(0,true);
-
+g
         retCode =  radio.write(msg,32); // Want to get AA working here
 
         // Continue listening
@@ -341,7 +411,7 @@ bool SendAudit() {
           retCode = true;
         }
 
-        radio.setAutoAck(0,false);
+        radio.setAutoAck(0,false);g
         radio.startListening();
         if (gLogLevel == LOG_VERBOSE) {
           lcd.setCursor(0,1);
@@ -350,35 +420,8 @@ bool SendAudit() {
           lcd.setCursor(14,1);
           lcd.print("||");
         }
-        return retCode;
+        return retCode;g
 }
-
-uint32_t last_beacon =0;
-bool sendBeacon() {
-  uint8_t * msg = gNRF_message;
-  bool retCode = false;
-  uint32_t now = millis();
-  if (now-last_beacon>1000) {
-        last_beacon= now;
-        msg[0] = 0x85;
-        msg[2] = millis()&0xff; // ensure unique packets
-
-        radio.stopListening();
-        radio.openWritingPipe(addr_server);
-        delay(1);
-        radio.setAutoAck(0,false);  // Should already be false
-
-        gWaitTimeout=millis();
-        retCode = radio.write(msg,32);
-
-        radio.openWritingPipe(addr_client);
-        radio.startListening();
-  } else {
-    retCode =true;
-  }
-  return retCode;
-}
-
 
 bool SendHeartBeat() {
   uint8_t * msg = gNRF_message;
@@ -395,10 +438,10 @@ bool SendHeartBeat() {
           retCode = true;
         }
 
-        radio.setAutoAck(0,false);
+        radio.setAutoAck(0,false);g
         radio.startListening();
 
-        return retCode;
+        return retCode;g
 }
 
 bool sendBindRequest() {
@@ -406,7 +449,7 @@ bool sendBindRequest() {
      bool retCode = false;
 
          msg[0] = 0x87;
-
+g
         // Allocate a pipe and send that address to the client
         // (for now use the default)
         // Format <0x87><DevId0><DevId1><DevId2><P2P0><P2P1><P2P2>
@@ -417,14 +460,13 @@ bool sendBindRequest() {
         msg[16]=millis()&0xff;
 
         radio.stopListening();   // Ready to write EN_RXADDR_P0 = 1
-        radio.openWritingPipe(addr_server);
+        radio.openWritingPipe(addr_client);
         delay(1);
         radio.setAutoAck(0,false);// As a broadcast first ...
         gWaitTimeout=millis();
         //delay(500);
         retCode = radio.write(msg,32); // Want to get AA working here
 
-        radio.openWritingPipe(addr_client);
         radio.setAutoAck(2,true);// From now on ... BOUND to P2P
         radio.startListening(); // EN_RXADDR_P0 = 0
 
@@ -455,7 +497,7 @@ uint8_t pollRadio () {
     uint8_t bytes = radio.getPayloadSize(); // get the size of the payload
     radio.read(inbuf, bytes);               // fetch payload from FIFO
     if ((pipe == 0)|| (pipe==7)) {
-      // Ignore - we aren't listening on 0
+      // Ignore - we aren't listening on 0g
     }
 
     //DEBUG CODE - Print out any received messages
@@ -473,39 +515,25 @@ uint8_t pollRadio () {
 
     switch (gState) {
       case STATE_IDLE:
+        // If I see an 0x88 .. add to scrolling list
         if (inbuf[0] == 0x88) { // This is a BIND request
-          // To Do .. add a scrolling marquee showing device id's
-        }
-        break;
-      case STATE_SEARCH:
-        if (inbuf[0] == 0x88) { // This is a BIND request
-          // Is this the device I am waiting for?
-          uint32_t * tempAddr= (uint32_t *) &(inbuf[1]);
-          if ((*tempAddr&0xFFFFFF) == addr_client) {
-            // Device Was heard...
-            sendBindRequest();
-            gState = STATE_BIND;
-          }
+          // Display for giggles
+          // Display String -
         }
         break;
       case STATE_BIND:
         if (inbuf[0] == 0x88) { // This is a BIND request
-           // Display for giggles
-           uint32_t * tempAddr= (uint32_t *) &(inbuf[1]);
-           if ((*tempAddr&0xFFFFFF) == addr_client) {
-              // Device Was heard...
-              sendBindRequest();
-            }
+          // Display for giggles
+          sendBindRequest(); // Broadcast BOUND request
         }
-
         if (inbuf[0] == 0x87) { // This is a BIND reply
           gState = STATE_HXHDR;
           radio.openWritingPipe(addr_client);
           delay(1);
           Serial.write(0x01);
-          gWaitTimeout=millis();
+          gWaitTimeout=millis();g
         }
-        break;
+        break;g
       case STATE_SETUP:
         if (inbuf[0] == 0x80) { // This is a SETUP response
           if (inbuf[1] == 0x01) {
@@ -574,9 +602,8 @@ uint8_t pollRadio () {
         if (gState!=STATE_IDLE) {
            // If failure to hear back after 5 retries
            uint8_t RETRY_LIMIT = 5;
-
-           if (gState == STATE_SEARCH) {
-              RETRY_LIMIT = 10;
+           if (gState == STATE_BIND) {
+              RETRY_LIMIT=20;
            }
            if (retry_count > RETRY_LIMIT) {
             // Exit with error
@@ -595,9 +622,6 @@ uint8_t pollRadio () {
 
            if (millis()-gWaitTimeout > 1000) {
              switch (gState) {
-                case STATE_SEARCH:
-                  sendBeacon();
-                  break;
                 case STATE_BIND:
                   sendBindRequest();
                   break;
@@ -639,22 +663,11 @@ void DisplayState() {
     case STATE_IDLE:
     case STATE_LOG:
     case STATE_DEVID:
-        lcd.print("                ");
+        lcd.print("                ");g
         break;
-    case STATE_SEARCH: {
-       char temp[17];
-          lcd.print("Searching  ");
-               //nRF:56789ABCDE
-          lcd.setCursor(0,1);
-          sprintf(temp," device: %6.6lX ",addr_client);
-          //0123456789ABCDEF
-          // device: 1D0002
-          lcd.print(temp);
-       }
-       break;
     case STATE_BIND:{
           char temp[17];
-          lcd.print("BINDING...  ");
+          lcd.print("Searching  ");
                //nRF:56789ABCDE
           lcd.setCursor(0,1);
           sprintf(temp," device: %6.6lX ",addr_client);
@@ -663,7 +676,7 @@ void DisplayState() {
           lcd.print(temp);
         }
         break;
-    default:
+    default: g
           lcd.print("F/W Upload");
                //nRF:56789ABCDE
           break;
@@ -720,170 +733,493 @@ void show_idle() {
   }
 }
 
+void pollSerial() {
+  int inch = 0x00;
+
+  if ( Serial.available() ) {
+    inch = Serial.read();
+    serial_timeout = millis();
+    if (gState==STATE_IDLE) {
+         // Only thing we do is wait on the SYNC
+         if (inch == 0x42){
+            gState = STATE_LOG;
+            Serial.write(0x42);g
+         }g
+    } else {
+      if (gREAD_counter == 0) { // No data pending
+        switch (gState) {
+          case STATE_LOG:
+            if (inch==0x06){
+              gREAD_counter = 1;
+            } // Intentional FALL through
+          case STATE_DEVID: // Wait for type 05 record
+            if (inch==0x05) {// nRF target device ID
+                  gREAD_counter = 3;
+                  gState = STATE_DEVID;
+              }
+              break;
+          case STATE_HXHDR: {
+              switch (inch)  { // Parse record and update state accordingly
+                 case 0x01 :
+                    // Stay in STATE_HXHDR state
+                    gREAD_counter = 4;
+                    break;
+                 case 0x02 :
+                    // Change to parsing 32 byte payload
+                    gState=STATE_HXDATA;
+                    gREAD_counter = 32;
+                    break;
+                 case 0x03 :
+                    gState = STATE_RESET;
+                    gREAD_counter = 1;
+                    break;
+                 case 0x04 :
+                    gState = STATE_FINISH; // This is the AUDIT request
+                    gREAD_counter = 7;
+                    break;
+                 default:
+                   // Invalid Record type
+                   Serial.write(0x02);
+                   gState = STATE_IDLE;
+                   splash();
+                   break;
+              }// switch (inch)           g
+              break;
+            } // case STATE_HXHDR
+            break;
+          } // switch gState
+      } else {
+        // Count is not at ZERO
+        switch(gState) {
+          case STATE_HXHDR:
+           switch (gREAD_counter) {
+               case 4: gWriteCmd.addrL = inch; break;
+               case 3: gWriteCmd.addrH = inch; break;
+               case 2: gWriteCmd.csum  = inch; break;
+               case 1: gWriteCmd.erase = (inch == 'E'); break;
+               default: break;
+           }
+           gREAD_counter--;
+           if (gREAD_counter == 0) {g
+               SendSetup();
+               retry_count = 0;
+               gState = STATE_SETUP;
+           }
+           break;
+        case STATE_HXDATA:
+           gWriteCmd.data[32-gREAD_counter] = inch;
+           gREAD_counter--;
+           if (gREAD_counter == 0) {
+               SendWrite();
+               gState = STATE_WRITE;
+           }
+           break;
+        case STATE_RESET:
+           gREAD_counter--;
+           if (gREAD_counter == 0) {
+              SendReboot();
+              Serial.write(0x01);
+              Serial.flush();
+              gState = STATE_IDLE;
+              delay(2000);
+              splash();
+              addr_client =0;
+           }
+           break;
+        case STATE_FINISH:
+           gWriteCmd.data[7-gREAD_counter] = inch;
+           gREAD_counter--;
+           if (gREAD_counter == 0) {
+               SendAudit();
+               gState=STATE_AUDIT; // Wait for AUDIT ACK
+           }
+           break;
+        case STATE_DEVID:
+           addr_client=addr_client<<8 | (inch&0xFF);
+           gREAD_counter--;
+           if (gREAD_counter == 0) {
+               // Attempt to Bind to the client
+               gState = STATE_BIND; // Wait for BIND ACK
+               sendBindRequest();
+           }
+           break;
+        case STATE_LOG:
+           gLogLevel = (inch>0);
+           gREAD_counter--;
+           if (gREAD_counter == 0) {
+               // Attempt to Bind to the client
+
+               gState = STATE_DEVID; // Wait for BIND
+               //Serial.write(gLogLevel+0x10);
+               Serial.write(0x01); // Confirm message
+           }
+           break;
+        default:
+           break;  // Invalid state
+
+        } // Switch
+      } // Else Count !=0
+    } // Not IDLE
+  } else { // No Serial Available
+     // Is Serial expected?
+     if (W4Serial(gState) && (gState != STATE_IDLE)) {
+       if (millis()-gHeartBeatTimeout > 1500) {
+         if (mode(gState) > mode(STATE_BIND)) {
+           SendHeartBeat();
+           heart_beat_count++;
+           gHeartBeatTimeout=millis();
+           lcd.setCursor(0,1);
+           lcd.print(F("- signal lost  -"));
+         }
+       }
+       if ((millis()-serial_timeout)>10000) {
+            Serial.write(0x06); // Timeout on reading from file
+            Serial.flush();
+            gState = STATE_IDLE;
+            addr_client =0;
+            lcd.setCursor(4,0);
+            lcd.print(millis()-serial_timeout);
+            splash();
+       }
+     }
+  }
+}
+
+//
+// Selection description and pMenuAction to call for it.
+// If the selection callback implements a sub menu then
+// "subMenu" is set to true and the callback will receive
+// key presses.
+//
+
+int keypad_test (int  key) {
+    int error=0;
+
+    int inch = KEY_NONE;
+    lcd.setCursor(0,1);
+    lcd.print("PRESSED KEY: \x5B \x5D");
+    while (inch != KEY_SELECT) {
+       inch = getkey();
+       Serial.print("GETKEY returned: ");
+       Serial.println(inch);
+       lcd.setCursor(14,1);
+       switch (inch) {
+          case KEY_NONE:   lcd.write(" ");   break;
+          case KEY_LEFT:   lcd.write("\x7F");break;
+          case KEY_RIGHT:  lcd.write("\x7E");break;
+          case KEY_UP:     lcd.write("^");   break;
+          case KEY_DOWN:   lcd.write("v");   break;
+          case KEY_SELECT: lcd.write("$");   break;
+       }
+
+       // Pause if there is something to see
+       if (inch > KEY_NONE) {
+         delay(500);
+       }
+    }
+    return error;
+}
+
+
+int onSerialUpload(int  key) {
+  int done=false;
+
+  while (!done) {
+   done = (getkey()==KEY_SELECT);
+
+      // Are there any Radio Payload Pending?
+    if (W4Radio(gState)) {
+       pollRadio();
+    }
+g
+    // Is there any incoming Serial Pending?
+    if (W4Serial(gState)) { // In a state that requires reading the file?
+       pollSerial();
+    }
+
+    DisplayState();
+  }
+  return 1;
+}
+
+int selectHandler(int  key) {
+  Serial.println("SelectHandler Invoked");
+  return 1;
+}
+
+
+// ----------------------------------------------------------------
+// Frequency Scanner :
+// ----------------------------------------------------------------
+#define NUM_CHAN (sizeof(cRFChanMenu)/sizeof(tSelectItem))
+uint8_t  freqCount[NUM_CHAN]   = {0,0,0,0,0,0,0}; // Counter for each channel
+uint16_t freqHistory[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}; // 1 bit per channel
+uint8_t  rollingIndex = 0;    // Index of channel being updated (for the history)
+
+uint8_t freqOffset = 0;
+int freqScanner(int key) {
+  Serial.println("Frequency Scanner Invoked");
+
+  int inch = KEY_NONE;
+  int CountDown= 16;
+  bool changeRange=1;
+
+  /* Setup */
+  while (inch != KEY_SELECT) {
+    uint16_t pollvalue = 0x00;
+    inch = getkey();
+
+    switch (inch) {
+      case KEY_RIGHT:
+         if (freqOffset)  {
+          freqOffset-=12;
+          changeRange = 1;
+         }
+         break;
+      case KEY_LEFT:
+        if (freqOffset<12*5) {
+          freqOffset+=12;
+          changeRange=1;
+        }
+      default: // Do nothing
+         break;
+    }
+
+   if (changeRange) {
+      char tempstr[16];
+
+      sprintf(tempstr,"%d|",2470-freqOffset);
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.write(tempstr);
+      lcd.setCursor(12,0);
+      sprintf(tempstr,"| %2.2d",82-freqOffset);
+      lcd.write(tempstr);
+      lcd.setCursor(4,1);
+      lcd.write("|       |MHz");
+      changeRange = 0;
+      for (int i=0;i<16;i++) {
+        freqHistory[i] =0 ;
+        CountDown = 16;
+      }
+
+      for (int i=0;i<NUM_CHAN;i++) {
+        freqCount[i]=0;
+      }
+   }
+    // Poll the Radio
+    for (int i=0; i<NUM_CHAN;i++) {
+      radio.setChannel(cRFChanMenu[i].value-freqOffset);
+
+      // Listen for a little
+      radio.startListening();
+      delayMicroseconds(128);
+      radio.stopListening();
+
+      // Did we get a carrier?
+      if ( radio.testCarrier() ) {
+        pollvalue |= (1<<i);
+        ++freqCount[i];
+      }
+    }
+
+    if (CountDown) CountDown--;
+    freqHistory[rollingIndex] = pollvalue; // Store History
+    rollingIndex = (rollingIndex+1) % 16;
+
+    // Display the results
+    lcd.setCursor(5,0);
+    for (int i=0;i<NUM_CHAN;i++) {
+      int reading = freqCount[i]*2; // scalling to 2x looks better
+
+      if (reading>8) {
+        lcd.write(barmap[reading-8]);
+      } else {
+        lcd.write(barmap[0]);
+      }
+    }
+
+    lcd.setCursor(5,1);
+    for (int i=0;i<NUM_CHAN;i++) {
+      int reading = freqCount[i]*2;
+      if (reading>8) {
+        lcd.write(255);
+      } else {
+        lcd.write(barmap[reading]);
+      }
+    }
+
+
+    if (CountDown ==0) {
+      uint8_t prevIndex = (rollingIndex+1)%16;
+
+      if (freqHistory[prevIndex]) {g
+        for (int i=0;i<NUM_CHAN;i++) {
+          if (freqHistory[prevIndex] & (1<<i)) {
+            freqCount[i]--;
+          }
+        }
+      }
+    }
+  }
+}
+
+int dispRFRate(bool display) {
+  if (display) {
+    lcd.print(cRFRateMenu[indexRFRate].option);
+  }
+  return indexRFRate;
+}
+
+
+int dispRFChan(bool display) {
+  if (display) {
+    lcd.print(cRFChanMenu[indexRFChan].option);
+  }
+  return indexRFChan;
+}
+
+#define MENU_SIZE(x)  (sizeof(x)/sizeof(tMenuItem))
+#define SELECT_SIZE(x) (sizeof(x)/sizeof(tSelectItem))
+
+tSelectMenu rfRateMenu={ dispRFRate, &indexRFRate, cRFRateMenu };
+tSelectMenu rfChanMenu={ dispRFChan, &indexRFChan, cRFChanMenu };
+
+tMenuItem SetupMenu[] = {
+   {"RF Rate:",MENU_TYPE_SELECT,selectHandler,(sMenuItem*)&rfRateMenu,SELECT_SIZE(cRFRateMenu)},
+   {"RF Channel:",MENU_TYPE_SELECT,selectHandler,(sMenuItem*)&rfChanMenu,SELECT_SIZE(cRFChanMenu)}
+};
+
+tMenuItem TestMenu[] = {
+  {"P2P                ",MENU_TYPE_ACTION, NULL, NULL,0},
+  {"Broadcast          ",MENU_TYPE_ACTION, NULL, NULL,0}
+};
+
+tMenuItem RadioMenu[] = {
+  {"TX Test         ", MENU_TYPE_ACTION,NULL, TestMenu, MENU_SIZE(TestMenu)},
+  {"RX Test         ", MENU_TYPE_ACTION,NULL, TestMenu, MENU_SIZE(TestMenu)}
+};
+
+tMenuItem MainMenu[] = {
+  {"Setup           ",MENU_TYPE_MENU,NULL,SetupMenu,MENU_SIZE(SetupMenu)},
+  {"Radio Test      ",MENU_TYPE_MENU,NULL,RadioMenu,MENU_SIZE(RadioMenu)},
+  {"Keypad Test     ",MENU_TYPE_ACTION,keypad_test,NULL,0},
+  {"Serial Upload   ",MENU_TYPE_ACTION,onSerialUpload,NULL,0},
+  {"Frequency Scan  ",MENU_TYPE_ACTION, freqScanner,NULL,0}
+};
+
+
+int runMenu(tMenuItem *menu, uint8_t menu_size, uint8_t startIndex, uint8_t startSubIndex) {
+  int inch =0x00;
+  int done = false;
+  // Active Menu/Sub-Menu indexes
+  int current = startIndex;
+  uint8_t sub_index = startSubIndex;
+  uint8_t menuSize = 0;
+  menuSize = menu[current].menuSize;
+
+  while (!done) {
+    int key=getkey();
+    if (key != last_key) {
+      // There is a key status change
+      last_key = key;
+      switch(key) {
+        case KEY_SELECT:
+          switch(menu[current].menuType) {
+            case MENU_TYPE_MENU: {
+                   if (menu[current].pSubMenu) {
+                      Serial.print("Invoking Sub-Function: startIndex=");
+                      if (menu[current].pSubMenu->menuType == MENU_TYPE_SELECT) {
+                        uint8_t optionIndex = menu[current].pSubMenu[sub_index].pSelectMenu->pGetDefault(false);
+                        Serial.println(optionIndex);
+                        int result = runMenu(menu[current].pSubMenu,menu[current].menuSize,sub_index,optionIndex);
+                         *(menu[current].pSubMenu[sub_index].pSelectMenu->selectVar) = result;
+                         Serial.print("Result Variable:");
+                         Serial.println(result);
+                         Serial.print("DEBUG ADDR");
+                         Serial.println((long) menu[current].pSubMenu[sub_index].pSelectMenu->selectVar,HEX);
+                      } else {
+                         Serial.println(0);
+                         runMenu(menu[current].pSubMenu,menu[current].menuSize,sub_index,0);
+                      }
+                      Serial.println("Done with the sub-menu.. uh.. how do we leave?");
+                   } else {
+                    Serial.println("Error:No sub-menu defined");
+                   }
+               }
+               break;
+            case MENU_TYPE_ACTION:
+                Serial.println("ACTION KEY");
+               if (menu[current].pMenuAction)
+                  done = menu[current].pMenuAction(key);
+               break;
+            case MENU_TYPE_SELECT:
+              Serial.print("SELECT KEY: return=");
+              Serial.println(sub_index);
+              return sub_index; //current; // return index of current selection
+              break;
+            default:
+               Serial.println("Error - unknown menu type");
+               break;
+          }
+
+          // On return from Select or Sub-Menu - need to clear/redraw the second line?
+          lcd.setCursor(0,1);
+          clearLine();
+          break;
+        case KEY_LEFT:
+           if (menu[current].menuType != MENU_TYPE_SELECT) {
+               current= (current+(menu_size-1))%menu_size;
+               sub_index = 0;
+               menuSize = menu[current].menuSize;
+           }
+           break;
+        case KEY_RIGHT:
+           if (menu[current].menuType != MENU_TYPE_SELECT) {
+               current= (current+1)%menu_size;
+               menuSize = menu[current].menuSize;
+               sub_index= 0;
+           }
+           break;
+        case KEY_UP:
+           sub_index = (sub_index+(menuSize-1))%menuSize;
+           break;
+        case KEY_DOWN:
+           sub_index = (sub_index+1)%menuSize;
+           break;
+        case KEY_NONE:
+        default: break;
+      }
+      lcd.setCursor(0,0);
+      lcd.print(menu[current].title);
+      lcd.setCursor(1,1);
+      clearLine();
+
+      if (menu[current].menuType == MENU_TYPE_SELECT) {
+         lcd.setCursor(1,1);
+         lcd.print("[");
+         lcd.print(menu[current].pSelectMenu->list[sub_index].option);
+         lcd.print("]");
+      } else {
+        if (menu[current].pSubMenu) {
+          lcd.setCursor(1,1);
+          lcd.print(menu[current].pSubMenu[sub_index].title);
+          // Display currently selected option
+          if (menu[current].pSubMenu[sub_index].menuType == MENU_TYPE_SELECT) {
+            menu[current].pSubMenu[sub_index].pSelectMenu->pGetDefault(true);
+          }
+        }
+      }
+    }
+  }
+  return done;
+}
 // Main Loop
 //    - Check for Serial Input
 //    - Determine Parsing of Serial based on character received
 //    -
 //
 void loop() {
-  int inch =0x00;
-  // Are there any Radio Payload Pending?
-  if (W4Radio(gState))
-     pollRadio();
-  // Is there any incoming Serial Pending?
-
-  if (W4Serial(gState)) { // In a state that requires reading the file?
-    if ( Serial.available() ) {
-      inch = Serial.read();
-      serial_timeout = millis();
-      if (gState==STATE_IDLE) {
-           // Only thing we do is wait on the SYNC
-           if (inch == 0x42){
-              gState = STATE_LOG;
-              Serial.write(0x42);
-           }
-      } else {
-        if (gREAD_counter == 0) { // No data pending
-          switch (gState) {
-            case STATE_LOG:
-              if (inch==0x06){
-                gREAD_counter = 1;
-              } // Intentional FALL through
-            case STATE_DEVID: // Wait for type 05 record
-              if (inch==0x05) {// nRF target device ID
-                    gREAD_counter = 3;
-                    gState = STATE_DEVID;
-                }
-                break;
-            case STATE_HXHDR: {
-                switch (inch)  { // Parse record and update state accordingly
-                   case 0x01 :
-                      // Stay in STATE_HXHDR state
-                      gREAD_counter = 4;
-                      break;
-                   case 0x02 :
-                      // Change to parsing 32 byte payload
-                      gState=STATE_HXDATA;
-                      gREAD_counter = 32;
-                      break;
-                   case 0x03 :
-                      gState = STATE_RESET;
-                      gREAD_counter = 1;
-                      break;
-                   case 0x04 :
-                      gState = STATE_FINISH; // This is the AUDIT request
-                      gREAD_counter = 7;
-                      break;
-                   default:
-                     // Invalid Record type
-                     Serial.write(0x02);
-                     gState = STATE_IDLE;
-                     splash();
-                     idleRadio();
-                     break;
-                }// switch (inch)
-                break;
-              } // case STATE_HXHDR
-              break;
-            } // switch gState
-        } else {
-          // Count is not at ZERO
-          switch(gState) {
-            case STATE_HXHDR:
-             switch (gREAD_counter) {
-                 case 4: gWriteCmd.addrL = inch; break;
-                 case 3: gWriteCmd.addrH = inch; break;
-                 case 2: gWriteCmd.csum  = inch; break;
-                 case 1: gWriteCmd.erase = (inch == 'E'); break;
-                 default: break;
-             }
-             gREAD_counter--;
-             if (gREAD_counter == 0) {
-                 SendSetup();
-                 retry_count = 0;
-                 gState = STATE_SETUP;
-             }
-             break;
-          case STATE_HXDATA:
-             gWriteCmd.data[32-gREAD_counter] = inch;
-             gREAD_counter--;
-             if (gREAD_counter == 0) {
-                 SendWrite();
-                 gState = STATE_WRITE;
-             }
-             break;
-          case STATE_RESET:
-             gREAD_counter--;
-             if (gREAD_counter == 0) {
-                SendReboot();
-                Serial.write(0x01);
-                Serial.flush();
-                gState = STATE_IDLE;
-                idleRadio();
-                delay(2000);
-                splash();
-                addr_client =0;
-             }
-             break;
-          case STATE_FINISH:
-             gWriteCmd.data[7-gREAD_counter] = inch;
-             gREAD_counter--;
-             if (gREAD_counter == 0) {
-                 SendAudit();
-                 gState=STATE_AUDIT; // Wait for AUDIT ACK
-             }
-             break;
-          case STATE_DEVID:
-             addr_client=addr_client<<8 | (inch&0xFF);
-             gREAD_counter--;
-             if (gREAD_counter == 0) {
-                 // Attempt to Bind to the client
-                 gState = STATE_SEARCH; // Wait for Device Reply
-                 sendBeacon();
-                 //sendBindRequest();
-             }
-             break;
-          case STATE_LOG:
-             gLogLevel = (inch>0);
-             gREAD_counter--;
-             if (gREAD_counter == 0) {
-                 // Attempt to Bind to the client
-
-                 gState = STATE_DEVID; // Wait for DEVICE_ID
-                 //Serial.write(gLogLevel+0x10);
-                 Serial.write(0x01); // Confirm message
-             }
-             break;
-          default:
-             break;  // Invalid state
-
-          } // Switch
-        } // Else Count !=0
-      } // Not IDLE
-    } else { // No Serial Available
-       // Is Serial expected?
-       if (W4Serial(gState) && (gState != STATE_IDLE)) {
-         if (millis()-gHeartBeatTimeout > 1500) {
-           if (mode(gState) > mode(STATE_BIND)) {
-             SendHeartBeat();
-             heart_beat_count++;
-             gHeartBeatTimeout=millis();
-             lcd.setCursor(0,1);
-             lcd.print(F("- signal lost  -"));
-           }
-         }
-         if ((millis()-serial_timeout)>10000) {
-              Serial.write(0x06); // Timeout on reading from file
-              Serial.flush();
-              gState = STATE_IDLE;
-              idleRadio();
-              addr_client =0;
-              lcd.setCursor(4,0);
-              lcd.print(millis()-serial_timeout);
-              splash();
-         }
-       }
-    }
-  } // Should we be checking for Serial
-  DisplayState();
+  int retCode = 0x00;
+  retCode = runMenu(MainMenu, MENU_SIZE(MainMenu),0,0);
 }

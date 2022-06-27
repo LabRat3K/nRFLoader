@@ -286,7 +286,7 @@ bool SendSetup(){
         // Send the message
         radio.stopListening(); // Ready to Write - EN_RXADDRP0 = 1
         radio.setAutoAck(0,true);
-g
+
         retCode =  radio.write(msg,32); // Want to get AA working here
 
         // Continue listening
@@ -411,7 +411,7 @@ bool SendAudit() {
           retCode = true;
         }
 
-        radio.setAutoAck(0,false);g
+        radio.setAutoAck(0,false);
         radio.startListening();
         if (gLogLevel == LOG_VERBOSE) {
           lcd.setCursor(0,1);
@@ -420,7 +420,7 @@ bool SendAudit() {
           lcd.setCursor(14,1);
           lcd.print("||");
         }
-        return retCode;g
+        return retCode;
 }
 
 bool SendHeartBeat() {
@@ -438,10 +438,10 @@ bool SendHeartBeat() {
           retCode = true;
         }
 
-        radio.setAutoAck(0,false);g
+        radio.setAutoAck(0,false);
         radio.startListening();
 
-        return retCode;g
+        return retCode;
 }
 
 bool sendBindRequest() {
@@ -449,7 +449,7 @@ bool sendBindRequest() {
      bool retCode = false;
 
          msg[0] = 0x87;
-g
+
         // Allocate a pipe and send that address to the client
         // (for now use the default)
         // Format <0x87><DevId0><DevId1><DevId2><P2P0><P2P1><P2P2>
@@ -470,13 +470,16 @@ g
         radio.setAutoAck(2,true);// From now on ... BOUND to P2P
         radio.startListening(); // EN_RXADDR_P0 = 0
 
+    #ifdef DEBUG
         lcd.setCursor(0,1);
+
         if(gLogLevel == LOG_VERBOSE) {
           uint32_t tempAddr;
           radio.qryAddrReg(0x0C,(char *)&tempAddr);
           lcd.print(">>");
           lcd.print(tempAddr,HEX);
         }
+    #endif
         return retCode;
 }
 
@@ -497,7 +500,7 @@ uint8_t pollRadio () {
     uint8_t bytes = radio.getPayloadSize(); // get the size of the payload
     radio.read(inbuf, bytes);               // fetch payload from FIFO
     if ((pipe == 0)|| (pipe==7)) {
-      // Ignore - we aren't listening on 0g
+      // Ignore - we aren't listening on 0
     }
 
     //DEBUG CODE - Print out any received messages
@@ -531,9 +534,9 @@ uint8_t pollRadio () {
           radio.openWritingPipe(addr_client);
           delay(1);
           Serial.write(0x01);
-          gWaitTimeout=millis();g
+          gWaitTimeout=millis();
         }
-        break;g
+        break;
       case STATE_SETUP:
         if (inbuf[0] == 0x80) { // This is a SETUP response
           if (inbuf[1] == 0x01) {
@@ -663,7 +666,7 @@ void DisplayState() {
     case STATE_IDLE:
     case STATE_LOG:
     case STATE_DEVID:
-        lcd.print("                ");g
+        lcd.print("                ");
         break;
     case STATE_BIND:{
           char temp[17];
@@ -676,7 +679,7 @@ void DisplayState() {
           lcd.print(temp);
         }
         break;
-    default: g
+    default: 
           lcd.print("F/W Upload");
                //nRF:56789ABCDE
           break;
@@ -743,8 +746,8 @@ void pollSerial() {
          // Only thing we do is wait on the SYNC
          if (inch == 0x42){
             gState = STATE_LOG;
-            Serial.write(0x42);g
-         }g
+            Serial.write(0x42);
+         }
     } else {
       if (gREAD_counter == 0) { // No data pending
         switch (gState) {
@@ -783,7 +786,7 @@ void pollSerial() {
                    gState = STATE_IDLE;
                    splash();
                    break;
-              }// switch (inch)           g
+              }// switch (inch)
               break;
             } // case STATE_HXHDR
             break;
@@ -800,7 +803,7 @@ void pollSerial() {
                default: break;
            }
            gREAD_counter--;
-           if (gREAD_counter == 0) {g
+           if (gREAD_counter == 0) {
                SendSetup();
                retry_count = 0;
                gState = STATE_SETUP;
@@ -931,7 +934,7 @@ int onSerialUpload(int  key) {
     if (W4Radio(gState)) {
        pollRadio();
     }
-g
+
     // Is there any incoming Serial Pending?
     if (W4Serial(gState)) { // In a state that requires reading the file?
        pollSerial();
@@ -1053,7 +1056,7 @@ int freqScanner(int key) {
     if (CountDown ==0) {
       uint8_t prevIndex = (rollingIndex+1)%16;
 
-      if (freqHistory[prevIndex]) {g
+      if (freqHistory[prevIndex]) {
         for (int i=0;i<NUM_CHAN;i++) {
           if (freqHistory[prevIndex] & (1<<i)) {
             freqCount[i]--;

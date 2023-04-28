@@ -84,33 +84,56 @@
 		; Used During Device Init
 		TXADDR:3
 	; -- The follow block is a cached copy from the EEPROM
-		; [0-2] Device ID - 24-bit unique identifier
+	; NOTE: SYNTAX ISSUE - must note have comment on the line, or won't be exported
+		; Bootloader & OTA config
+			; [0] Config Version
+		CSTART
+			; [1-3] Device ID - 24-bit unique identifier
 		RXADDR:3
-		; [3]Device Type 0=16F1823 1=16f1825
+		; Hardware Info
+			; [4]
+		PCB_TYPE
+			; [5]
+		PCB_VERS
+			; [6] Device Type 0=16F1823 1=16f1825 2=16F722 0x80=ATMEGA328P
 		DEVTYPE
-		; [4]Bootloader Version
+			; [7-8] # channels supported by hardware
+		NUM_CHL
+		NUM_CHH
+		; BootLoader Info
+			; [9] Bootloader Version
 		BL_VERSION
-		; [5]Application Identifier
+			; [10]Application Identifier
 		APP_MAGIC
-		; [6]Application Version Identifier
-		APP_VERSION
-		; [7]..[8] Configuration Parameter
-		START_CHL
-		START_CHH
- 		; [9]..[10]Filespace 0x200.. Checksum Range
- 		; Note: 16 word ROWS for checksum calc
+		; Client Application Config
+			; [11-12]Application Size
 		APP_SIZEL
 		APP_SIZEH
- 		; [11]..[12] 16-bit checksum value
+			; [13-14] 16-bit checksum value
 		APP_CSUML
 		APP_CSUMH
-		; [13] NRF RF CHAN config parameter
-                APP_RFCHAN
+			; [15] Application Version Identifier
+		APP_VERSION
+		START_CHL
+			; [16-17] Configuration Parameter
+		START_CHH
+			; [18] NRF RF CHAN config parameter
+		APP_RFCHAN
+			; [19] RF RATE (1/2 Mbps)
+		APP_RFRATE
+			; [20] Admin Capabilities Bitmap
+		ADMIN_CAP
+		end_config_block:0
 		end_bank0_vars:0
  ENDC
  if end_bank0_vars > 0x6F
 	error "Bank 20 Variable Space overrun"
  endif
+
+#define CONFIG_SIZE (end_config_block - CSTART)
+if CONFIG_SIZE > 31
+   error "CONFIG larger than NRF payload maximum"
+endif
 
 ; --------------------------
 ; Bank 1 Memory : 32 bytes
@@ -665,7 +688,7 @@ BL_CMD_QRY
 		; Place BootLoader version from CODE in the message
 	BANKSEL rxpayload
 		movlw	BOOTLOADER_VERSION
-		movwf	rxpayload+(BL_VERSION-RXADDR)+1
+		movwf	rxpayload+(BL_VERSION-CSTART)+1 ;Add one for the command byte
 SEND_PAYLOAD
 	BANKSEL LATA
 		bcf	NRF_CE
@@ -819,10 +842,10 @@ _nrf_cmd_setup
 ; ------------------------------------------------------------
 BL_POPULATE_CACHE
 		clrf	FSR0H 				; BANK 0 variables
-		movlw	LOW RXADDR
+		movlw	LOW CSTART
 		movwf	FSR0L 				; Point to ID_HIGH
 _read_eeprom
-		movlw	0x10
+		movlw	CONFIG_SIZE
 		movwf	BL_TEMP				; # bytes to read
 	BANKSEL EEADRL 					; Start reading at 0xF000
 		clrf	EEADRL
@@ -844,7 +867,7 @@ sub_write_csum
 		movlw	4				;# bytes to copy
 		movwf	BL_TEMP
 	BANKSEL EEADRL
-		movlw   (APP_SIZEL-RXADDR) ; Offset in the EEPROM
+		movlw   (APP_SIZEL-CSTART) ; Offset in the EEPROM
 		movwf	EEADRL
 sub_write_csum_loop
 WRITE_TO_FLASH

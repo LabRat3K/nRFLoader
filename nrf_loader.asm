@@ -260,7 +260,7 @@ BL_NRF_HDLR
 	BANKSEL rxpayload
         ;; Based on the CMD byte .. take action (is the upper nibble 0x8n?
 		movfw	rxpayload
-		andlw	0xF0
+		andlw	0xF8   ; 0xF8 = CMD byte and we will ignore 0x88
 		xorlw	0x80
 		btfss	STATUS,Z
 		retlw	0x02			; Invalid content.. ignore packet and keep listening

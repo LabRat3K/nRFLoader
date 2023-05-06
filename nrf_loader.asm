@@ -84,45 +84,45 @@
 		; Used During Device Init
 		TXADDR:3
 	; -- The follow block is a cached copy from the EEPROM
-	; NOTE: SYNTAX ISSUE - must note have comment on the line, or won't be exported
-		; Bootloader & OTA config
-			; [0] Config Version
-		CSTART
-			; [1-3] Device ID - 24-bit unique identifier
-		RXADDR:3
-		; Hardware Info
-			; [4]
-		PCB_TYPE
-			; [5]
-		PCB_VERS
-			; [6] Device Type 0=16F1823 1=16f1825 2=16F722 0x80=ATMEGA328P
-		DEVTYPE
-			; [7-8] # channels supported by hardware
-		NUM_CHL
-		NUM_CHH
-		; BootLoader Info
-			; [9] Bootloader Version
-		BL_VERSION
-			; [10]Application Identifier
-		APP_MAGIC
-		; Client Application Config
-			; [11-12]Application Size
-		APP_SIZEL
-		APP_SIZEH
-			; [13-14] 16-bit checksum value
-		APP_CSUML
-		APP_CSUMH
-			; [15] Application Version Identifier
-		APP_VERSION
-		START_CHL
-			; [16-17] Configuration Parameter
-		START_CHH
-			; [18] NRF RF CHAN config parameter
-		APP_RFCHAN
-			; [19] RF RATE (1/2 Mbps)
-		APP_RFRATE
-			; [20] Admin Capabilities Bitmap
-		ADMIN_CAP
+        ; NOTE: SYNTAX ISSUE - must note have comment on the line, or won't be exported
+                ; Bootloader & OTA config
+                        ; [0] Config Version
+                CSTART
+                        ; [1-3] Device ID - 24-bit unique identifier
+                RXADDR:3
+                ; Hardware Info
+                        ; [4]
+                PCB_TYPE
+                        ; [5]
+                PCB_VERS
+                        ; [6] Device Type 0=16F1823 1=16f1825 2=16F722 0x80=ATMEGA328P
+                DEVTYPE
+                        ; [7-8] # channels supported by hardware
+                NUM_CHL
+                NUM_CHH
+                ; BootLoader Info
+                        ; [9] Bootloader Version
+                BL_VERSION
+                        ; [10]Application Identifier
+                APP_MAGIC
+                ; Client Application Config
+                        ; [11-12]Application Size
+                APP_SIZEL
+                APP_SIZEH
+                        ; [13-14] 16-bit checksum value
+                APP_CSUML
+                APP_CSUMH
+                        ; [15] Application Version Identifier
+                APP_VERSION
+                START_CHL
+                        ; [16-17] Configuration Parameter
+                START_CHH
+                        ; [18] NRF RF CHAN config parameter
+                APP_RFCHAN
+                        ; [19] RF RATE (1/2 Mbps)
+                APP_RFRATE
+                        ; [20] Admin Capabilities Bitmap
+                ADMIN_CAP
 		end_config_block:0
 		end_bank0_vars:0
  ENDC
@@ -199,7 +199,6 @@ endif
 ; ==================
  	ORG 0x000
         clrf PCLATH
-
         goto BL_INIT
 
  	ORG 0x004
@@ -229,12 +228,13 @@ BL_MAIN_LOOP
 	; Timeout
 		call	sub_bl_audit		; Call the CSUM routine
 		btfss	WREG,0			; WREG contains result of the AUDIT
-		goto	BL_CMD_RESET 		;    1=CSUM failure... reset and try again
+		goto 	_bl_cmd_qry			; 	 1=CSUM failure... RE-announce to server 
 		goto	APP_EVENT_HANDLER 	;    0=CSUM pass...hand off the APPLICATION
 
 _check_nrf_network
 		call	BL_NRF_HDLR
 		goto	BL_MAIN_LOOP
+
 BL_NRF_HDLR
 		nrfReadReg NRF_STATUS	; BSR=0
 	; WARNING - this method is *NOT* the proper way. Race condition can result
@@ -250,6 +250,7 @@ BL_NRF_HDLR
 		lsrf	nrfStatus,w
 		andlw	0x07 			; w contains the pipe index...
 								; only receive on Pipe 1 - ignore others
+;DEBUG DEBUG listen on all pipes
 		decfsz	WREG,W
 		retlw	0x01			; Continue listening
 
@@ -507,6 +508,8 @@ BL_CMD_COMMIT
 		;	Write the LAST WORD(s)
 		movlw	1				; Will be 2 for the 16f1825
 		movwf	BL_TEMP
+;Fx?
+		bcf		EECON1,LWLO	; Trigger write from LATCH on final byte
 		call	_wloop_with_incr
 
 		tstf	BL_CALC_SUML	; verify the checksum (should sum to 0)
@@ -514,8 +517,8 @@ BL_CMD_COMMIT
 		goto	_commit_fail	; if there's a mismatch, abort the write
 
 								; checksum is valid, write the data
-		bcf		EECON1,LWLO
-		call	UNLOCK_FLASH	; stalls until write finishes
+;		bcf		EECON1,LWLO
+;		call	UNLOCK_FLASH	; stalls until write finishes
 		movlw	0x01
 _commit_exit
 		bcf		EECON1,WREN		; Disable Writes
@@ -568,7 +571,7 @@ BL_INIT
 
 	; BANK 0 Register INIT
 	BANKSEL PORTA
-		movlw	0x7D
+		movlw	0x71
 		movwf	T1CON
 
 	; BANK 2 Register INIT
@@ -580,7 +583,7 @@ BL_INIT
 
 	; BANK 1 Register INIT
 	BANKSEL WDTCON
-	;	bcf		WDTCON,0		; turn off WDT
+	;	bcf		WDTCON,0		; turn off WDT 
 	; We are going to want a Watchdog here, to ensure recovery of failing devices
 		movlw	0xF0				; setup internal oscillator
 		movwf	OSCCON				; 32Mhz (8Mhz internal oscillator, 4xPLL )
@@ -593,8 +596,8 @@ BL_INIT
 		movlw 	0x02				; outputs:CS, SDO, NRF_CE
 		movwf	TRISC				; inputs: SDI
 
-		movlw	0x08				; Enable internal pull-ups, Interrupt on Falling edge
-		movwf	OPTION_REG			; No Prescalar for the TMR0 clock
+		clrf	OPTION_REG			; Enable internal pull-ups, Interrupt on Falling edge 
+									; No Prescalar for the TMR0 clock
 
 	; BANK 3 Register INIT
 	BANKSEL ANSELA	; BANK3
@@ -666,6 +669,7 @@ BL_INIT
 
 		; Setup max number of retries
 		nrfWriteRegL	NRF_SETUP_RETR, 0x0F
+_bl_cmd_qry ; Entry point to TX 0x88, then return to BL_MAIN_LOOP
 		call	BL_CMD_QRY
 		goto	BL_MAIN_LOOP
 
@@ -758,7 +762,7 @@ _ack_done
 		;Start receiving
 		bsf		NRF_CE 			; From standby into Listening Mode
 		call 	delay_130us
-		retlw	0x04
+		retlw	0x04	; Tell the APP that this message was processed
 
 delay_130us
 		movlw 	216		; 208=130us, 216=136us
@@ -871,6 +875,7 @@ sub_write_csum
 		movwf	EEADRL
 sub_write_csum_loop
 WRITE_TO_FLASH
+	BANKSEL 	EEDATL
 		moviw	FSR0++
 		movwf	EEDATL
 

@@ -33,8 +33,8 @@ MDB_DEVICE = PIC16F1823
 
 AS = gpasm
 DASM = gpdasm
-MPLABX_DIR = /Applications/microchip/mplabx
-MDB = $(MPLABX_DIR)/mplab_ide.app/Contents/Resources/mplab_ide/bin/mdb.sh
+MPLABX_DIR = /opt/microchip/mplabx/v5.40/mplab_platform/bin
+MDB = $(MPLABX_DIR)/mdb.sh
 
 
 

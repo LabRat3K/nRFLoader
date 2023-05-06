@@ -27,6 +27,7 @@ end_global_vars
 ; EEPROM (cache) fields shared between BL & APP
 rxpayload
 TXADDR
+CSTART
 RXADDR
 BL_VERSION
 APP_MAGIC
@@ -34,6 +35,8 @@ APP_VERSION
 START_CHL
 START_CHH
 APP_RFCHAN
+APP_RFRATE
+ADMIN_CAP
 nrfTempByte
 nrfTempRX
 nrfByteCount

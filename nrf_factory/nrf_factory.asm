@@ -69,9 +69,9 @@
 ; User definable options
 ; -------------------------
 ;
-;#define DEBUG
 ; Define the default start address
-#define START_ADDRESS D'022'
+#define DEBUG
+
 ; Invert the incoming DMX signal
 ;#define INVERT_OUTPUT
 
@@ -110,7 +110,6 @@
  CBLOCK BL_bank0_vars
 	; Take a look at Symbols exported from the BL
 	; First 2 bytes are pulled from EEPROM 
-		APP_BAUD_RATE
 		RESERVED
 		chan1val:NUM_DISPLAY_CHAN	; Values actively being displayed
 		chan1new:NUM_DISPLAY_CHAN	; Values to be used in next duty cycle
@@ -146,9 +145,6 @@
 	error "Global Variable Space overrun"
  endif	
 
-; ---------------------------------------------
-; Device address - valid range 0 - 20 (decimal)
-#define DEVICEADDR (START_ADDRESS-0x01)
 
 ; --------------------------------------
 #define chan2val (chan1val+1)
@@ -209,7 +205,10 @@ PWMReset
         clrf    pwmpinsA	; We've been through 256  cycles of PWM, so it's time
 				; pwmpins is a byte  variable. Bytes are cleared
 				; here (turning off red,  green and blue drive pins)
-        clrf	LATA		; and the entire byte is  pushed out to LATA.
+        ;clrf	LATA		; and the entire byte is  pushed out to LATA.
+	movfw	LATA
+	andlw	0xEC
+	movwf	LATA
 #endif
 	BANKSEL chan1val
         movlw   D'255'		; Reset the counter to allow 255 values per channel 
@@ -278,7 +277,7 @@ APP_START
 
 main_loop
 		call	BL_NRF_HDLR ; Returns 1 if there is a non-admin payload
-							; 00 - nothing, 01 - not PIPE 1, 02 - Unknown payload, 04- Handled by BL
+					; 00 - nothing, 01 - not PIPE 1, 02 - Unknown payload, 04- Handled by BL
 		addlw	0x00		; get the Z bit set
 		btfsc	STATUS,Z
 		goto	main_loop	; Zero - no payload
@@ -312,12 +311,16 @@ _test_for_bind
 		retlw	0x00
 
 _handle_bind_request
+#ifdef DEBUG
+	  BANKSEL LATA
+		bcf	LATA,4
+#endif
 		; Disable Listening on all Pipes and re-open listening Pipes
 		bcf		nrfTempRX,2
 		nrfWriteRegL	NRF_EN_RXADDR, 0x00
 		nrfWriteRegEx 	NRF_RX_ADDR_P0, rxpayload,3
 		nrfWriteRegEx 	NRF_RX_ADDR_P1, RXADDR,3
-		nrfWriteReg		NRF_EN_RXADDR, nrfTempRX
+		nrfWriteReg	NRF_EN_RXADDR, nrfTempRX
 		; Code now matched BL .. let it handle the BIND
 		; From here on out the BL code should succesfully handle 
 		; BL requests from the device
@@ -398,12 +401,12 @@ CMD_NEWCHAN
 		movlw	2				;# bytes to copy
 		movwf	BL_TEMP
 	BANKSEL EEADRL
-		movlw   (START_CHL-RXADDR) ; Offset in the EEPROM
+		movlw   (START_CHL-CSTART) ; Offset in the EEPROM
 		movwf	EEADRL
 		call	WRITE_TO_FLASH
 	;Write Completed - re-read/re-init device (might be better to reboot)
 		clrf	FSR0H 				; BANK 0 variables
-		movlw	LOW RXADDR
+		movlw	LOW CSTART
 		movwf	FSR0L 				; Point to ID_HIGH
 		call	_read_eeprom
 		call	GET_INDEX
@@ -417,7 +420,8 @@ CMD_NEWID
 		movlw	3
 		movwf	BL_TEMP
 	BANKSEL EEADRL
-		clrf	EEADRL ; START address is at 0x00
+		movlw	(RXADDR-CSTART)
+		movwf	EEADRL 
 		call	WRITE_TO_FLASH
 		; Write completed .. restart the device
 		call	_reply_ack
@@ -445,6 +449,9 @@ INIT_CHIP
 		clrf	IOCAN
 
 	BANKSEL LATA	; BANK 2
+#ifdef DEBUG
+		bsf	LATA,4
+#endif
 	return
 
 ; ------------------------------------
@@ -472,9 +479,38 @@ INIT_MEM
 		decfsz	nrfByteCount,f
 		goto 	$-2			; jump back to movwi
 
+		; Default Application Values
+	BANKSEL APP_VERSION
+		movfw	APP_VERSION
+		xorlw	0xFF
+		btfsc	STATUS,Z
+		goto	_init_eeprom
+
 		clrf	nrfStatus
 		clrf	pwmpinsA
+		return
+_init_eeprom
+		movlw	1
+		movwf	APP_VERSION
+		clrf	START_CHL
+		clrf	START_CHH
+		movlw	0x52
+		movwf	APP_RFCHAN
+		movlw	0x02
+		movwf	APP_RFRATE
+		movlw	0xFF ; TODO - replace with proper capability map
+		movwf	ADMIN_CAP
 
+		movlw   HIGH APP_VERSION
+		movwf	FSR0H
+		movlw	LOW APP_VERSION
+		movwf	FSR0L
+		movlw	6
+		movwf	BL_TEMP
+	BANKSEL EEADRL
+		movlw	(APP_VERSION-CSTART)
+		movwf	EEADRL
+		call	WRITE_TO_FLASH
 		return
 
 ; ---------------------------------
@@ -499,7 +535,7 @@ INIT_NRF
 		; Clear any pending STATUS flags, RX_DR | TX_DS | MAX_RT
 		nrfWriteRegL NRF_STATUS, 0x70
 
-		; Set RF_CH, 80
+		; Set RF_CH, 82
 	BANKSEL APP_RFCHAN
 		movfw	APP_RFCHAN
 		xorlw	0xFF
@@ -532,16 +568,10 @@ _set_rf_chan
  ; Use 3 byte address PIPE1  0xC0DE42 for traffic
  ; and <my device id> for admin packets, and default
  ; TRANSMIT address to 0xC0DEC1
-	BANKSEL rxpayload
-		movlw 0xC0
-		movwf rxpayload ; Use rxpayload as a temp buffer
-		movlw 0xDE
-		movwf rxpayload+1
-		movlw 0x42
-		movwf rxpayload+2
-		; Write to ADD_P0
-		nrfWriteRegEx NRF_RX_ADDR_P2, rxpayload, 3
-	BANKSEL rxpayload
+	BANKSEL rxpayload ;P2 = Dimming Data
+		nrfWriteRegL NRF_RX_ADDR_P2, 0x42
+
+	BANKSEL rxpayload   ;; P1 = WNRF Broadcast
 		movlw 0xC1
 		movwf rxpayload
 		movlw 0xDE
@@ -649,286 +679,5 @@ EndofData:
 	dt "(c) 2022 Andrew Williams"
 
 ; ---------------------------------------------------------
-; ---------------------------------------------------------
-	ORG 0x6FF
-DmxCurveLookup
-		addwf	PCL,F
-	ORG 0x700
-; ---
-; DMX Dimming Curve
-DmxCurve
-		;/* 0x0x */
-		retlw 0x00
-		retlw 0x00
-		retlw 0x00
-		retlw 0x00
-		retlw 0x00
-		retlw 0x00
-		retlw 0x00
-		retlw 0x00
-		retlw 0x00
-		retlw 0x00
-		retlw 0x01
-		retlw 0x01
-		retlw 0x01
-		retlw 0x01
-		retlw 0x01
-		retlw 0x01
-		;/* 0x1x */
-		retlw 0x01
-		retlw 0x01
-		retlw 0x01
-		retlw 0x01
-		retlw 0x01
-		retlw 0x01
-		retlw 0x01
-		retlw 0x01
-		retlw 0x01
-		retlw 0x02
-		retlw 0x02
-		retlw 0x02
-		retlw 0x02
-		retlw 0x02
-		retlw 0x02
-		retlw 0x02
-		;/* 0x2x */
-		retlw 0x02
-		retlw 0x02
-		retlw 0x03
-		retlw 0x03
-		retlw 0x03
-		retlw 0x03
-		retlw 0x03
-		retlw 0x03
-		retlw 0x04
-		retlw 0x04
-		retlw 0x04
-		retlw 0x04
-		retlw 0x04
-		retlw 0x05
-		retlw 0x05
-		retlw 0x05
-		;/* 0x3x */
-		retlw 0x05
-		retlw 0x06
-		retlw 0x06
-		retlw 0x06
-		retlw 0x07
-		retlw 0x07
-		retlw 0x07
-		retlw 0x08
-		retlw 0x08
-		retlw 0x08
-		retlw 0x09
-		retlw 0x09
-		retlw 0x0A
-		retlw 0x0A
-		retlw 0x0B
-		retlw 0x0B
-		;/* 0x4x */
-		retlw 0x0C
-		retlw 0x0C
-		retlw 0x0D
-		retlw 0x0D
-		retlw 0x0E
-		retlw 0x0F
-		retlw 0x0F
-		retlw 0x10
-		retlw 0x11
-		retlw 0x11
-		retlw 0x12
-		retlw 0x13
-		retlw 0x14
-		retlw 0x15
-		retlw 0x16
-		retlw 0x17
-		;/* 0x5x */
-		retlw 0x18
-		retlw 0x19
-		retlw 0x1A
-		retlw 0x1B
-		retlw 0x1C
-		retlw 0x1D
-		retlw 0x1F
-		retlw 0x20
-		retlw 0x21
-		retlw 0x23
-		retlw 0x24
-		retlw 0x26
-		retlw 0x27
-		retlw 0x29
-		retlw 0x2B
-		retlw 0x2C
-		;/* 0x6x */
-		retlw 0x2E
-		retlw 0x30
-		retlw 0x32
-		retlw 0x34
-		retlw 0x36
-		retlw 0x38
-		retlw 0x3A
-		retlw 0x3C
-		retlw 0x3E
-		retlw 0x40
-		retlw 0x43
-		retlw 0x45
-		retlw 0x47
-		retlw 0x4A
-		retlw 0x4C
-		retlw 0x4F
-		;/* 0x7x */
-		retlw 0x51
-		retlw 0x54
-		retlw 0x57
-		retlw 0x59
-		retlw 0x5C
-		retlw 0x5F
-		retlw 0x62
-		retlw 0x64
-		retlw 0x67
-		retlw 0x6A
-		retlw 0x6D
-		retlw 0x70
-		retlw 0x73
-		retlw 0x76
-		retlw 0x79
-		retlw 0x7C
-		;/* 0x8x */
-		retlw 0x7F
-		retlw 0x82
-		retlw 0x85
-		retlw 0x88
-		retlw 0x8B
-		retlw 0x8E
-		retlw 0x91
-		retlw 0x94
-		retlw 0x97
-		retlw 0x9A
-		retlw 0x9C
-		retlw 0x9F
-		retlw 0xA2
-		retlw 0xA5
-		retlw 0xA7
-		retlw 0xAA
-		;/* 0x9x */
-		retlw 0xAD
-		retlw 0xAF
-		retlw 0xB2
-		retlw 0xB4
-		retlw 0xB7
-		retlw 0xB9
-		retlw 0xBB
-		retlw 0xBE
-		retlw 0xC0
-		retlw 0xC2
-		retlw 0xC4
-		retlw 0xC6
-		retlw 0xC8
-		retlw 0xCA
-		retlw 0xCC
-		retlw 0xCE
-		;/* 0xAx */
-		retlw 0xD0
-		retlw 0xD2
-		retlw 0xD3
-		retlw 0xD5
-		retlw 0xD7
-		retlw 0xD8
-		retlw 0xDA
-		retlw 0xDB
-		retlw 0xDD
-		retlw 0xDE
-		retlw 0xDF
-		retlw 0xE1
-		retlw 0xE2
-		retlw 0xE3
-		retlw 0xE4
-		retlw 0xE5
-		;/* 0xBx */
-		retlw 0xE6
-		retlw 0xE7
-		retlw 0xE8
-		retlw 0xE9
-		retlw 0xEA
-		retlw 0xEB
-		retlw 0xEC
-		retlw 0xED
-		retlw 0xED
-		retlw 0xEE
-		retlw 0xEF
-		retlw 0xEF
-		retlw 0xF0
-		retlw 0xF1
-		retlw 0xF1
-		retlw 0xF2
-		;/* 0xCx */
-		retlw 0xF2
-		retlw 0xF3
-		retlw 0xF3
-		retlw 0xF4
-		retlw 0xF4
-		retlw 0xF5
-		retlw 0xF5
-		retlw 0xF6
-		retlw 0xF6
-		retlw 0xF6
-		retlw 0xF7
-		retlw 0xF7
-		retlw 0xF7
-		retlw 0xF8
-		retlw 0xF8
-		retlw 0xF8
-		;/* 0xDx */
-		retlw 0xF9
-		retlw 0xF9
-		retlw 0xF9
-		retlw 0xF9
-		retlw 0xFA
-		retlw 0xFA
-		retlw 0xFA
-		retlw 0xFA
-		retlw 0xFA
-		retlw 0xFB
-		retlw 0xFB
-		retlw 0xFB
-		retlw 0xFB
-		retlw 0xFB
-		retlw 0xFB
-		retlw 0xFC
-		;/* 0xEx */
-		retlw 0xFC
-		retlw 0xFC
-		retlw 0xFC
-		retlw 0xFC
-		retlw 0xFC
-		retlw 0xFC
-		retlw 0xFC
-		retlw 0xFC
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFD
-		;/* 0xFx */
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFD
-		retlw 0xFE
-		retlw 0xFE
-		retlw 0xFE
-		retlw 0xFE
-		retlw 0xFE
-		retlw 0xFE
-		retlw 0xFE
-		retlw 0xFE
-; ----------------- end! -------	
         END
 

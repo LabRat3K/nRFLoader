@@ -71,6 +71,8 @@
 ;
 ; Define the default start address
 #define DEBUG
+#define APP_MAJOR (0)
+#define APP_MINOR (2)
 
 ; Invert the incoming DMX signal
 ;#define INVERT_OUTPUT
@@ -88,6 +90,7 @@
 
 #define PAYLOAD_SIZE 32
 #define NUM_DISPLAY_CHAN 3
+#define APP_ADMIN_CAP 0x27
 
 ; Must be placed before CBLOCK to pickuped definition of start addresses
 ;
@@ -333,24 +336,25 @@ _PIPE_1
 ; ** TO DO ** add a timeout method .. to reset and return to normal mode
 		decfsz	WREG,W	; If return was a 1, this is NOT a BIND
 		call	_handle_bind_request
-		movlw	0x85
+
+		; Check Payload Command Byte
+		movlw	0x85 ;   BEACON - send the I am Here response
 		xorwf	rxpayload,W
 		btfsc	STATUS,Z
 		goto	BL_CMD_QRY
-		; Check Payload Command Byte
-		movlw	0x01
+
+		movlw	0x01 ; NEW START Address
 		xorwf	rxpayload,W
 		btfsc	STATUS,Z
 		goto	CMD_NEWCHAN
 		
 		; Check Payload Command Byte
-		movlw	0x03
+		movlw	0x03 ; NEW Device Id
 		xorwf	rxpayload,W
 		btfsc	STATUS,Z
 		goto	CMD_NEWID
 
-		; To Do -- add BAUD, CHAN, and START ADDR handlers here
-	;   BEACON - send the I am Here response
+		; To Do -- add BAUD, CHAN, and handlers here
 		goto main_loop	
 
 _PIPE_2		; Packet on the dimming channel
@@ -481,16 +485,22 @@ INIT_MEM
 
 		; Default Application Values
 	BANKSEL APP_VERSION
+		; Update APP capabilities
+		movlw	APP_ADMIN_CAP	; LEDMAP|STARTCH|DEVID|OTA
+		movwf	ADMIN_CAP
+
+		; Check if EEPROM has been updated for this APP
 		movfw	APP_VERSION
-		xorlw	0xFF
-		btfsc	STATUS,Z
+		xorlw	(APP_MAJOR<<4)|APP_MINOR
+	;TODO: Enhanced test to verify BL compatibility
+		btfss	STATUS,Z
 		goto	_init_eeprom
 
 		clrf	nrfStatus
 		clrf	pwmpinsA
 		return
 _init_eeprom
-		movlw	1
+		movlw	(APP_MAJOR<<4)|APP_MINOR
 		movwf	APP_VERSION
 		clrf	START_CHL
 		clrf	START_CHH
@@ -498,7 +508,7 @@ _init_eeprom
 		movwf	APP_RFCHAN
 		movlw	0x02
 		movwf	APP_RFRATE
-		movlw	0xFF ; TODO - replace with proper capability map
+		movlw	APP_ADMIN_CAP
 		movwf	ADMIN_CAP
 
 		movlw   HIGH APP_VERSION

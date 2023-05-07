@@ -71,7 +71,7 @@
 ; System definitions - Users should not be messing below this line.
 ; (I know you will.. we always do)
 ;
-#define BOOTLOADER_VERSION 0x04 ; <Major>.<Minor> release
+#define BOOTLOADER_VERSION 0x05 ; <Major>.<Minor> release
 #define CLOCKRATE 32000000
 #define PAYLOAD_SIZE 32
 
@@ -183,8 +183,9 @@ endif
 ; ------------------------------
  CBLOCK 0x2000
 		; This is a linear mapping of all 112 bytes (80 + 32)
+        end_bank_linear_vars:0
  ENDC
- if end_bank_global_vars > 0x29AF
+ if end_bank_linear_vars > 0x29AF
 	error "Linear Map Variable Space overrun"
  endif
 
@@ -260,7 +261,7 @@ BL_NRF_HDLR
 	BANKSEL rxpayload
         ;; Based on the CMD byte .. take action (is the upper nibble 0x8n?
 		movfw	rxpayload
-		andlw	0xF8   ; 0xF8 = CMD byte and we will ignore 0x88
+		andlw	0xF8
 		xorlw	0x80
 		btfss	STATUS,Z
 		retlw	0x02			; Invalid content.. ignore packet and keep listening
@@ -688,11 +689,20 @@ BL_CMD_QRY
 		movlw	LOW rxpayload+1
 		movwf	FSR0L
 		call	_read_eeprom	; BSR=3
-		; Enqueue the payload in the Tx Register
-		; Place BootLoader version from CODE in the message
+
+		; Add the ADMIN_CAP to end of the CONFIG block
+		; This allows the APP to change the ADMIN_CAP,
+		; and re-use the BL_CMD_QRY function
+	BANKSEL ADMIN_CAP
+		movfw	ADMIN_CAP
 	BANKSEL rxpayload
+		movwf	rxpayload+(ADMIN_CAP-CSTART)+1
+
+		; Place BootLoader version from CODE in the message
 		movlw	BOOTLOADER_VERSION
 		movwf	rxpayload+(BL_VERSION-CSTART)+1 ;Add one for the command byte
+
+		; Enqueue the payload in the Tx Register
 SEND_PAYLOAD
 	BANKSEL LATA
 		bcf	NRF_CE
@@ -848,8 +858,13 @@ BL_POPULATE_CACHE
 		clrf	FSR0H 				; BANK 0 variables
 		movlw	LOW CSTART
 		movwf	FSR0L 				; Point to ID_HIGH
+		call	_read_eeprom
+		movlw	0x21				; Store BL capability at the end of the CACHE
+		movwi	FSR0++
+		return
+
 _read_eeprom
-		movlw	CONFIG_SIZE
+		movlw	CONFIG_SIZE-1 			; Everything EXCEPT the ADMIN_CAP
 		movwf	BL_TEMP				; # bytes to read
 	BANKSEL EEADRL 					; Start reading at 0xF000
 		clrf	EEADRL

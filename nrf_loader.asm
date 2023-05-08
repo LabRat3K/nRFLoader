@@ -114,8 +114,8 @@
                 APP_CSUMH
                         ; [15] Application Version Identifier
                 APP_VERSION
-                START_CHL
                         ; [16-17] Configuration Parameter
+                START_CHL
                 START_CHH
                         ; [18] NRF RF CHAN config parameter
                 APP_RFCHAN

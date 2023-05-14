@@ -1,6 +1,8 @@
 #ifndef _lcd_menu_h
 #define _lcd_menu_h
 
+
+// Menu types - sub-menu, data selection, or invoke an action
 #define MENU_TYPE_MENU   0x00
 #define MENU_TYPE_SELECT 0x01
 #define MENU_TYPE_ACTION 0x02
@@ -21,9 +23,10 @@ typedef struct sSelectMenu {
 	tSelectItem *list;	 // Pointer Itemto the Select/Option list
 } tSelectMenu;
 
+
 // -----  Menu type -----
 typedef struct sMenuItem {
-  char          title[17];
+  char          title[17];      // 16 Characters plus 0x0 EOS
   uint8_t 	menuType;
   menuHdlr      pMenuAction;
   union {

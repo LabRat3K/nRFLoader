@@ -74,6 +74,8 @@ typedef uint32_t tDeviceId;
 // Addresses for this Device (Server) and the client device
 tDeviceId addr_server= 0xC0DEC1; // Primary broadcast and receive for the nRFLoader
 tDeviceId addr_p2p   = 0xC0DE02; // Pipe 2 - dedicated P2P address
+tDeviceId addr_data  = 0xC0DE42;
+
 tDeviceId addr_client= 0x123456; // Client device address
 
 // nRF Radio Frequency
@@ -685,7 +687,7 @@ void DisplayState() {
           lcd.print(temp);
         }
         break;
-    default: 
+    default:
           lcd.print("F/W Upload");
                //nRF:56789ABCDE
           break;
@@ -894,36 +896,89 @@ void pollSerial() {
   }
 }
 
+int radio_snoop (int key) {
+  int inch = KEY_NONE;
+
+  lcd.setCursor(0,0);
+  lcd.print("BROADCAST SNOOP ");
+  lcd.setCursor(0,1);
+  lcd.print("0 1 2 3 4 5 6 7   ");
+
+  // Listen on both the
+  radio.stopListening();   // Ready to write EN_RXADDR_P0 = 1
+  radio.openReadingPipe(0,addr_server);
+  radio.openReadingPipe(1,addr_data);
+  radio.startListening();
+
+  uint8_t pcount=0;
+  uint32_t timeout[8];
+
+  while (inch != KEY_SELECT) {
+    inch = getkey();
+    if (inch >=0) {
+       // Keypress
+    }
+    uint8_t pipe;
+    uint8_t inbuf[32];
+
+    if (radio.available(&pipe)) {
+       pipe=pipe&0x07;
+       uint8_t bytes = radio.getPayloadSize(); // get the size of the payload
+       radio.read(inbuf, bytes);               // fetch payload from FIFO
+       if (pipe==1) {
+          if (inbuf[0] == 0x00) {
+             pcount=(pcount+1)%44;
+             if (pcount==0) {
+                lcd.setCursor((pipe*2)+1,1);
+                lcd.write((uint8_t)1);
+                timeout[pipe]=millis()+1000;
+             }
+          }
+       } else {
+          lcd.setCursor((pipe*2)+1,1);
+          lcd.write((uint8_t)0);
+          timeout[pipe]=millis()+1000;
+       }
+    }
+    for (int i=0;i<8;i++) {
+       if (timeout[i] < millis()){
+          lcd.setCursor(1+(i*2),1);
+          lcd.print(" ");
+       }
+    }
+  }
+}
+
 const PROGMEM tRFRegInfo regInfo[]={
-   {"NRF_CONFIG",1,0},  
-   {"EN_AA",     1,1},  
-   {"EN_RXADDR", 1,2},  
-   {"SETUP_AW",  1,3},  
-   {"SETUP_RETR",1,4},  
-   {"RF_CH",     1,5},  
-   {"RF_SETUP",  1,6},  
-   {"NRF_STATUS",1,7},  
-   {"OBSERVE_TX",1,8},  
-   {"CD",        1,9},  
-   {"RXA0",5,10},  
-   {"RXA1",5,15},  
-   {"RXA2",1,20},  
-   {"RXA3",1,21},  
-   {"RXA4",1,22},  
-   {"RXA5",1,23},  
-   {"TXA", 5,24},  
-   {"RXPW0",  1,29},  
-   {"RXPW1",  1,30},  
-   {"RXPW2",  1,31},  
-   {"RXPW3",  1,32},  
-   {"RXPW4",  1,33},  
-   {"RXPW5",  1,34},  
-   {"FIFO_STAT",1,35},  
-   {"DYNPD",1, 36},  
-   {"FEATURE",1, 37},  
-   {"ce_pin",2, 38},  
+   {"NRF_CONFIG",1,0},
+   {"EN_AA",     1,1},
+   {"EN_RXADDR", 1,2},
+   {"SETUP_AW",  1,3},
+   {"SETUP_RETR",1,4},
+   {"RF_CH",     1,5},
+   {"RF_SETUP",  1,6},
+   {"NRF_STATUS",1,7},
+   {"OBSERVE_TX",1,8},
+   {"CD",        1,9},
+   {"RXA0",5,10},
+   {"RXA1",5,15},
+   {"RXA2",1,20},
+   {"RXA3",1,21},
+   {"RXA4",1,22},
+   {"RXA5",1,23},
+   {"TXA", 5,24},
+   {"RXPW0",  1,29},
+   {"RXPW1",  1,30},
+   {"RXPW2",  1,31},
+   {"RXPW3",  1,32},
+   {"RXPW4",  1,33},
+   {"RXPW5",  1,34},
+   {"FIFO_STAT",1,35},
+   {"DYNPD",1, 36},
+   {"FEATURE",1, 37},
+   {"ce_pin",2, 38},
    {"csn_pin",2,40},
-   {"SPI_SPEED",1,42} 
+   {"SPI_SPEED",1,42}
 };
 
 int radio_sanity_test (int key) {
@@ -932,7 +987,7 @@ int radio_sanity_test (int key) {
   uint8_t dispIndex = 0;
   tRFRegInfo cache;
   uint32_t* map = (uint32_t*)rf_registers;
-  
+
   lcd.setCursor(0,1);
   radio.encodeRadioDetails((uint8_t*) &(rf_registers[0]));
   lcd.print("RESULT:");
@@ -946,9 +1001,9 @@ int radio_sanity_test (int key) {
     Serial.println(" = PASS");
      lcd.print("PASS");
   }
- 
+
   while (inch != KEY_SELECT) {
-    inch = getkey();   
+    inch = getkey();
     if (inch >=0) {
         memcpy_P(&cache,&(regInfo[dispIndex]),sizeof(tRFRegInfo));
         lcd.setCursor(0,1);
@@ -960,7 +1015,7 @@ int radio_sanity_test (int key) {
            if (rf_registers[cache.offset+i]<16) {
               lcd.print("0");
            }
-           lcd.print(rf_registers[cache.offset+i],HEX); 
+           lcd.print(rf_registers[cache.offset+i],HEX);
         }
         if (inch == KEY_UP) {
           dispIndex=(dispIndex+1) % 29;
@@ -981,22 +1036,22 @@ int led_test ( int key ) {
 
   uint8_t cache = PORTC;
   uint8_t led_count = 0;
-  
+
   while (inch != KEY_SELECT) {
-    inch = getkey(); 
+    inch = getkey();
     // Pause if there is something to see
     if (inch>=0) {
         if (inch < KEY_NONE) {
           led_count=(led_count+1)%8;
 
-          lcd.setCursor(14,1);  // Debug code .. but looks nice. 
+          lcd.setCursor(14,1);  // Debug code .. but looks nice.
           lcd.write(led_count);
-           
+
           digitalWrite(LED_GREEN, (led_count&0x01));
           digitalWrite(LED_BLUE,  (led_count&0x02));
           digitalWrite(LED_AMBER, (led_count&0x04));
           delay(200);
-        }  
+        }
     }
   }
   digitalWrite(LED_GREEN,cache&0x01);
@@ -1207,15 +1262,20 @@ tMenuItem SetupMenu[] = {
    {"RF Channel:",   MENU_TYPE_SELECT,selectHandler,(sMenuItem*)&rfChanMenu,SELECT_SIZE(cRFChanMenu)}
 };
 
-tMenuItem TestMenu[] = {
+tMenuItem TxTestMenu[] = {
   {"P2P             ",MENU_TYPE_ACTION, NULL, NULL,0},
   {"Broadcast       ",MENU_TYPE_ACTION, NULL, NULL,0}
 };
 
+tMenuItem RxTestMenu[] = {
+  {"P2P             ",MENU_TYPE_ACTION, NULL, NULL,0},
+  {"Snoop           ",MENU_TYPE_ACTION, radio_snoop, NULL,0}
+};
+
 tMenuItem RadioMenu[] = {
   {"Sanity Check    ", MENU_TYPE_ACTION, radio_sanity_test, NULL, 0},
-  {"TX Test         ", MENU_TYPE_ACTION,NULL, TestMenu, MENU_SIZE(TestMenu)},
-  {"RX Test         ", MENU_TYPE_ACTION,NULL, TestMenu, MENU_SIZE(TestMenu)}
+  {"TX Test         ", MENU_TYPE_MENU,NULL, TxTestMenu, MENU_SIZE(TxTestMenu)},
+  {"RX Test         ", MENU_TYPE_MENU,NULL, RxTestMenu, MENU_SIZE(RxTestMenu)}
 };
 
 tMenuItem MainMenu[] = {
@@ -1270,9 +1330,15 @@ int runMenu(tMenuItem *menu, uint8_t menu_size, uint8_t startIndex, uint8_t star
                }
                break;
             case MENU_TYPE_ACTION:
-                Serial.println("ACTION KEY");
-               if (menu[current].pMenuAction)
+               {
+                  uint8_t optionIndex = sub_index;
+                  Serial.print("ACTION KEY");
+                  Serial.println(menu[current].title);
+                  Serial.print("Option:");
+                  Serial.println(optionIndex);
+                  if (menu[current].pMenuAction)
                   done = menu[current].pMenuAction(key);
+               }
                break;
             case MENU_TYPE_SELECT:
               Serial.print("SELECT KEY: return=");

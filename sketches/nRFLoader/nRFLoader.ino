@@ -900,7 +900,7 @@ int radio_snoop (int key) {
   int inch = KEY_NONE;
 
   lcd.setCursor(0,0);
-  lcd.print("BROADCAST SNOOP ");
+  lcd.print("Channel Snoop   ");
   lcd.setCursor(0,1);
   lcd.print("0 1 2 3 4 5 6 7   ");
 
@@ -945,6 +945,64 @@ int radio_snoop (int key) {
           lcd.setCursor(1+(i*2),1);
           lcd.print(" ");
        }
+    }
+  }
+}
+
+int device_snoop (int key) {
+  int inch = KEY_NONE;
+
+  lcd.setCursor(0,0);
+  lcd.print("Devices:   WNRF ");
+  lcd.setCursor(0,1);
+  clearLine();
+
+  // Listen on both the
+  radio.stopListening();   // Ready to write EN_RXADDR_P0 = 1
+  radio.openReadingPipe(0,addr_server);
+  radio.closeReadingPipe(1);
+  radio.startListening();
+
+  uint8_t pcount=0;
+  uint32_t timeout[2];
+
+  while (inch != KEY_SELECT) {
+    inch = getkey();
+    if (inch >=0) {
+       // Keypress
+    }
+    uint8_t pipe;
+    uint8_t inbuf[32];
+
+    if (radio.available(&pipe)) {
+       pipe=pipe&0x07;
+       uint8_t bytes = radio.getPayloadSize(); // get the size of the payload
+       radio.read(inbuf, bytes);               // fetch payload from FIFO
+       if (pipe==0) {
+          if (inbuf[0] == 0x85) {
+             lcd.setCursor(15,0);
+             lcd.write((uint8_t)0);
+             timeout[pipe]=millis()+1000;
+          }
+          if (inbuf[0] == 0x88) {
+                lcd.setCursor(0,1);
+                for (int i=0;i<3;i++) {
+                  if (inbuf[4-i]<16) {
+                      lcd.print("0");
+                  }
+                  lcd.print(inbuf[4-i],HEX);
+                }
+                timeout[1]=millis()+1000;
+          }
+       }
+    }
+    if (timeout[0] < millis()){
+       lcd.setCursor(15,0);
+       lcd.print(" ");
+    }
+    if (timeout[1] < millis()){
+       lcd.setCursor(0,1);
+       clearLine();
     }
   }
 }
@@ -1267,15 +1325,12 @@ tMenuItem TxTestMenu[] = {
   {"Broadcast       ",MENU_TYPE_ACTION, NULL, NULL,0}
 };
 
-tMenuItem RxTestMenu[] = {
-  {"P2P             ",MENU_TYPE_ACTION, NULL, NULL,0},
-  {"Snoop           ",MENU_TYPE_ACTION, radio_snoop, NULL,0}
-};
 
 tMenuItem RadioMenu[] = {
   {"Sanity Check    ", MENU_TYPE_ACTION, radio_sanity_test, NULL, 0},
   {"TX Test         ", MENU_TYPE_MENU,NULL, TxTestMenu, MENU_SIZE(TxTestMenu)},
-  {"RX Test         ", MENU_TYPE_MENU,NULL, RxTestMenu, MENU_SIZE(RxTestMenu)}
+  {"RX Snoop        ", MENU_TYPE_ACTION,radio_snoop, NULL, 0},
+  {"Dev Snoop       ", MENU_TYPE_ACTION,device_snoop, NULL, 0}
 };
 
 tMenuItem MainMenu[] = {

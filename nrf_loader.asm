@@ -46,7 +46,8 @@
 
 
 ; Configuration settings
-   __CONFIG _CONFIG1, _FOSC_INTOSC & _WDTE_OFF & _PWRTE_ON & _MCLRE_OFF & _CP_OFF & _CPD_OFF & _BOREN_ON & _CLKOUTEN_OFF & _IESO_OFF & _FCMEN_OFF
+   __CONFIG _CONFIG1, _FOSC_INTOSC &_PWRTE_ON & _WDTE_OFF & _MCLRE_OFF & _CP_OFF & _CPD_OFF & _BOREN_ON & _CLKOUTEN_OFF & _IESO_OFF & _FCMEN_OFF
+
    __CONFIG _CONFIG2, _WRT_BOOT & _PLLEN_ON & _STVREN_OFF & _BORV_LO & _LVP_ON
 
 ; NOTE: _WRT_BOOT - lock 0x000-0x1FFF from self-destruction (play it safe)
@@ -64,14 +65,16 @@
 ; ---------------------------------------------
 ; These defines will be BOARD specific
 ;
+;NOTE: CHIP on it's own uses LATA,5 for NRF_CE
+;  NRF3CH pcb's use LATC,4
 #define NRF_SPI_CS		LATC,3
-#define NRF_CE 			LATA,5	;	LATC,4
+#define NRF_CE 			LATC,4 ;LATA,5
 ; ------------------------------------------------------------------------------
 ; ------------------------------------------------------------------------------
 ; System definitions - Users should not be messing below this line.
 ; (I know you will.. we always do)
 ;
-#define BOOTLOADER_VERSION 0x04 ; <Major>.<Minor> release
+#define BOOTLOADER_VERSION 0x05 ; <Major>.<Minor> release
 #define CLOCKRATE 32000000
 #define PAYLOAD_SIZE 32
 
@@ -84,33 +87,56 @@
 		; Used During Device Init
 		TXADDR:3
 	; -- The follow block is a cached copy from the EEPROM
-		; [0-2] Device ID - 24-bit unique identifier
-		RXADDR:3
-		; [3]Device Type 0=16F1823 1=16f1825
-		DEVTYPE
-		; [4]Bootloader Version
-		BL_VERSION
-		; [5]Application Identifier
-		APP_MAGIC
-		; [6]Application Version Identifier
-		APP_VERSION
-		; [7]..[8] Configuration Parameter
-		START_CHL
-		START_CHH
- 		; [9]..[10]Filespace 0x200.. Checksum Range
- 		; Note: 16 word ROWS for checksum calc
-		APP_SIZEL
-		APP_SIZEH
- 		; [11]..[12] 16-bit checksum value
-		APP_CSUML
-		APP_CSUMH
-		; [13] NRF RF CHAN config parameter
+        ; NOTE: SYNTAX ISSUE - must note have comment on the line, or won't be exported
+                ; Bootloader & OTA config
+                        ; [0] Config Version
+                CSTART
+                        ; [1-3] Device ID - 24-bit unique identifier
+                RXADDR:3
+                ; Hardware Info
+                        ; [4]
+                PCB_TYPE
+                        ; [5]
+                PCB_VERS
+                        ; [6] Device Type 0=16F1823 1=16f1825 2=16F722 0x80=ATMEGA328P
+                DEVTYPE
+                        ; [7-8] # channels supported by hardware
+                NUM_CHL
+                NUM_CHH
+                ; BootLoader Info
+                        ; [9] Bootloader Version
+                BL_VERSION
+                        ; [10]Application Identifier
+                APP_MAGIC
+                ; Client Application Config
+                        ; [11-12]Application Size
+                APP_SIZEL
+                APP_SIZEH
+                        ; [13-14] 16-bit checksum value
+                APP_CSUML
+                APP_CSUMH
+                        ; [15] Application Version Identifier
+                APP_VERSION
+                START_CHL
+                        ; [16-17] Configuration Parameter
+                START_CHH
+                        ; [18] NRF RF CHAN config parameter
                 APP_RFCHAN
+                        ; [19] RF RATE (1/2 Mbps)
+                APP_RFRATE
+                        ; [20] Admin Capabilities Bitmap
+                ADMIN_CAP
+		end_config_block:0
 		end_bank0_vars:0
  ENDC
  if end_bank0_vars > 0x6F
 	error "Bank 20 Variable Space overrun"
  endif
+
+#define CONFIG_SIZE (end_config_block - CSTART)
+if CONFIG_SIZE > 31
+   error "CONFIG larger than NRF payload maximum"
+endif
 
 ; --------------------------
 ; Bank 1 Memory : 32 bytes
@@ -176,7 +202,8 @@
 ; ==================
  	ORG 0x000
         clrf PCLATH
-
+		call delay_130us
+		call delay_130us
         goto BL_INIT
 
  	ORG 0x004
@@ -206,12 +233,13 @@ BL_MAIN_LOOP
 	; Timeout
 		call	sub_bl_audit		; Call the CSUM routine
 		btfss	WREG,0			; WREG contains result of the AUDIT
-		goto	BL_CMD_RESET 		;    1=CSUM failure... reset and try again
+		goto 	_bl_cmd_qry			; 	 1=CSUM failure... RE-announce to server 
 		goto	APP_EVENT_HANDLER 	;    0=CSUM pass...hand off the APPLICATION
 
 _check_nrf_network
 		call	BL_NRF_HDLR
 		goto	BL_MAIN_LOOP
+
 BL_NRF_HDLR
 		nrfReadReg NRF_STATUS	; BSR=0
 	; WARNING - this method is *NOT* the proper way. Race condition can result
@@ -227,19 +255,20 @@ BL_NRF_HDLR
 		lsrf	nrfStatus,w
 		andlw	0x07 			; w contains the pipe index...
 								; only receive on Pipe 1 - ignore others
+;DEBUG DEBUG listen on all pipes
 		decfsz	WREG,W
 		retlw	0x01			; Continue listening
-
-	; Appears to be a valid BL packet - reset the timer counter
-		clrf	BL_WAIT_COUNT
 
 	BANKSEL rxpayload
         ;; Based on the CMD byte .. take action (is the upper nibble 0x8n?
 		movfw	rxpayload
-		andlw	0xF0
+		andlw	0xF8
 		xorlw	0x80
 		btfss	STATUS,Z
 		retlw	0x02			; Invalid content.. ignore packet and keep listening
+
+	; Appears to be a valid BL packet - reset the timer counter
+		clrf	BL_WAIT_COUNT
 
 		movfw	rxpayload		; Loop at the lower nibble to determine payload type
 		clrf	PCLATH 			; Note: JUMP table - must be kept in the same code page
@@ -484,6 +513,8 @@ BL_CMD_COMMIT
 		;	Write the LAST WORD(s)
 		movlw	1				; Will be 2 for the 16f1825
 		movwf	BL_TEMP
+;Fx?
+		bcf		EECON1,LWLO	; Trigger write from LATCH on final byte
 		call	_wloop_with_incr
 
 		tstf	BL_CALC_SUML	; verify the checksum (should sum to 0)
@@ -491,8 +522,8 @@ BL_CMD_COMMIT
 		goto	_commit_fail	; if there's a mismatch, abort the write
 
 								; checksum is valid, write the data
-		bcf		EECON1,LWLO
-		call	UNLOCK_FLASH	; stalls until write finishes
+;		bcf		EECON1,LWLO
+;		call	UNLOCK_FLASH	; stalls until write finishes
 		movlw	0x01
 _commit_exit
 		bcf		EECON1,WREN		; Disable Writes
@@ -545,7 +576,7 @@ BL_INIT
 
 	; BANK 0 Register INIT
 	BANKSEL PORTA
-		movlw	0x7D
+		movlw	0x71
 		movwf	T1CON
 
 	; BANK 2 Register INIT
@@ -557,7 +588,7 @@ BL_INIT
 
 	; BANK 1 Register INIT
 	BANKSEL WDTCON
-	;	bcf		WDTCON,0		; turn off WDT
+	;	bcf		WDTCON,0		; turn off WDT 
 	; We are going to want a Watchdog here, to ensure recovery of failing devices
 		movlw	0xF0				; setup internal oscillator
 		movwf	OSCCON				; 32Mhz (8Mhz internal oscillator, 4xPLL )
@@ -570,8 +601,8 @@ BL_INIT
 		movlw 	0x02				; outputs:CS, SDO, NRF_CE
 		movwf	TRISC				; inputs: SDI
 
-		movlw	0x08				; Enable internal pull-ups, Interrupt on Falling edge
-		movwf	OPTION_REG			; No Prescalar for the TMR0 clock
+		clrf	OPTION_REG			; Enable internal pull-ups, Interrupt on Falling edge 
+									; No Prescalar for the TMR0 clock
 
 	; BANK 3 Register INIT
 	BANKSEL ANSELA	; BANK3
@@ -643,6 +674,7 @@ BL_INIT
 
 		; Setup max number of retries
 		nrfWriteRegL	NRF_SETUP_RETR, 0x0F
+_bl_cmd_qry ; Entry point to TX 0x88, then return to BL_MAIN_LOOP
 		call	BL_CMD_QRY
 		goto	BL_MAIN_LOOP
 
@@ -661,11 +693,18 @@ BL_CMD_QRY
 		movlw	LOW rxpayload+1
 		movwf	FSR0L
 		call	_read_eeprom	; BSR=3
-		; Enqueue the payload in the Tx Register
-		; Place BootLoader version from CODE in the message
-	BANKSEL rxpayload
+                ; Add the ADMIN_CAP to end of the CONFIG block
+                ; This allows the APP to change the ADMIN_CAP,
+                ; and re-use the BL_CMD_QRY function
+        BANKSEL ADMIN_CAP
+                movfw   ADMIN_CAP
+        BANKSEL rxpayload
+                movwf   rxpayload+(ADMIN_CAP-CSTART)+1
+
 		movlw	BOOTLOADER_VERSION
-		movwf	rxpayload+(BL_VERSION-RXADDR)+1
+		movwf	rxpayload+(BL_VERSION-CSTART)+1 ;Add one for the command byte
+
+		; Enqueue the payload in the Tx Register
 SEND_PAYLOAD
 	BANKSEL LATA
 		bcf	NRF_CE
@@ -735,13 +774,14 @@ _ack_done
 		;Start receiving
 		bsf		NRF_CE 			; From standby into Listening Mode
 		call 	delay_130us
-		retlw	0x04
+		retlw	0x04	; Tell the APP that this message was processed
 
 delay_130us
-		movlw 	216		; 208=130us, 216=136us
-		goto	$+1 	; Two cycles
-		decfsz	WREG,F
-		goto 	$-2
+		movlw	0x3
+		decfsz	dummyData, f
+		goto	$+2
+		decfsz	WREG,W
+		goto	$-3
 		return
 ; ===============================================
 ; End of Main BootLoader Loop
@@ -819,10 +859,15 @@ _nrf_cmd_setup
 ; ------------------------------------------------------------
 BL_POPULATE_CACHE
 		clrf	FSR0H 				; BANK 0 variables
-		movlw	LOW RXADDR
+		movlw	LOW CSTART
 		movwf	FSR0L 				; Point to ID_HIGH
+		call	_read_eeprom
+		movlw	0x21				; Store BL capability at the end of the CACHE
+		movwi	FSR0++
+		return
+
 _read_eeprom
-		movlw	0x10
+		movlw	CONFIG_SIZE-1
 		movwf	BL_TEMP				; # bytes to read
 	BANKSEL EEADRL 					; Start reading at 0xF000
 		clrf	EEADRL
@@ -844,10 +889,11 @@ sub_write_csum
 		movlw	4				;# bytes to copy
 		movwf	BL_TEMP
 	BANKSEL EEADRL
-		movlw   (APP_SIZEL-RXADDR) ; Offset in the EEPROM
+		movlw   (APP_SIZEL-CSTART) ; Offset in the EEPROM
 		movwf	EEADRL
 sub_write_csum_loop
 WRITE_TO_FLASH
+	BANKSEL 	EEDATL
 		moviw	FSR0++
 		movwf	EEDATL
 

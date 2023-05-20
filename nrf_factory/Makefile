@@ -24,7 +24,8 @@ AS_DEVICE = 16f1823
 PROG = ../nrf16f1prog	# change this once you've installed the script
 AS = gpasm
 DASM = gpdasm
-PORT = -p /dev/ttyACM0
+PORT = -p /dev/ttyUSB1
+DEVICE = -D 0x1d0001
 
 ########## Make rules ##########
 
@@ -42,7 +43,7 @@ dis: $(HEX)
 
 # Flash
 flash: $(HEX)
-	sudo $(PROG) $(PORT) $(HEX)
+	sudo $(PROG) $(PORT) $(DEVICE) $(HEX)
 
 # Clean
 clean:

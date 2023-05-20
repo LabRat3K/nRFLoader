@@ -12,9 +12,10 @@
 #include <printf.h>
 
 #include <Wire.h>
-#include <LiquidCrystal_I2C.h>
+
 // For unknown reasons, typedef structures must come from external .h file
 #include "lcd_menu.h"
+#include "rf_debug.h"
 
 // Serial Configuration ====
 // =========================
@@ -50,28 +51,31 @@ static LRL_Key keypad;
 #define getkey() keypad.getKey()
 
 
-
-
-// Global Parameters ------------------------------------------
-// ------------------------------------------------------------
-#define LOG_NORMAL (0x00)
-#define LOG_VERBOSE (0x01)
-
+// Status LEDs
 #define LED_GREEN (A1)
 #define LED_BLUE  (A2)
 #define LED_AMBER (A3)
 
 
+// Global Parameters ------------------------------------------
+// ------------------------------------------------------------
+#define LOG_NORMAL  (0x00)
+#define LOG_VERBOSE (0x01)
+
+
 // gGlobal Variables
 //
 uint8_t gLogLevel = LOG_NORMAL;
-// For ease of copying, storing the nRF address (3 bytes) as the
-// three LSB of a uint32_t
+
+// For ease of copying, storing the nRF address (3 bytes)
+// as the three LSB of a uint32_t
 typedef uint32_t tDeviceId;
 
 // Addresses for this Device (Server) and the client device
 tDeviceId addr_server= 0xC0DEC1; // Primary broadcast and receive for the nRFLoader
 tDeviceId addr_p2p   = 0xC0DE02; // Pipe 2 - dedicated P2P address
+tDeviceId addr_data  = 0xC0DE42;
+
 tDeviceId addr_client= 0x123456; // Client device address
 
 // nRF Radio Frequency
@@ -86,7 +90,7 @@ tSelectItem cRFRateMenu[] = {
   {"1Mbps",0},
   {"2Mbps",1}
 };
-uint8_t indexRFRate= 0;
+uint8_t indexRFRate= 1; //Default 2MBps
 
 tSelectItem cRFChanMenu[] = {
   {"2470         ",70},
@@ -233,8 +237,12 @@ void setup() {
 
   // I2C LCD
   lcd.begin(16,2);
+
+  #ifdef USE_I2C_LCD
   lcd.setBacklightPin(3,POSITIVE);
   lcd.setBacklight(HIGH);
+  #endif
+
   lcd.createChar(0, Heart);  // Blinking Heart Icon
   lcd.createChar(1, Heart2);
   lcd.createChar(2, BAR2);
@@ -650,7 +658,7 @@ uint8_t pollRadio () {
 } // pollRadio
 
 
-char  poll_idle[4] ={'-',0xcd,'|','/'};
+char  poll_idle[4] ={'-','\\','|','/'};
 char poll_bound[4]={0,1,0,' '};
 
 void DisplayState() {
@@ -679,7 +687,7 @@ void DisplayState() {
           lcd.print(temp);
         }
         break;
-    default: 
+    default:
           lcd.print("F/W Upload");
                //nRF:56789ABCDE
           break;
@@ -888,12 +896,229 @@ void pollSerial() {
   }
 }
 
-//
-// Selection description and pMenuAction to call for it.
-// If the selection callback implements a sub menu then
-// "subMenu" is set to true and the callback will receive
-// key presses.
-//
+int radio_snoop (int key) {
+  int inch = KEY_NONE;
+
+  lcd.setCursor(0,0);
+  lcd.print("Channel Snoop   ");
+  lcd.setCursor(0,1);
+  lcd.print("0 1 2 3 4 5 6 7   ");
+
+  // Listen on both the
+  radio.stopListening();   // Ready to write EN_RXADDR_P0 = 1
+  radio.openReadingPipe(0,addr_server);
+  radio.openReadingPipe(1,addr_data);
+  radio.startListening();
+
+  uint8_t pcount=0;
+  uint32_t timeout[8];
+
+  while (inch != KEY_SELECT) {
+    inch = getkey();
+    if (inch >=0) {
+       // Keypress
+    }
+    uint8_t pipe;
+    uint8_t inbuf[32];
+
+    if (radio.available(&pipe)) {
+       pipe=pipe&0x07;
+       uint8_t bytes = radio.getPayloadSize(); // get the size of the payload
+       radio.read(inbuf, bytes);               // fetch payload from FIFO
+       if (pipe==1) {
+          if (inbuf[0] == 0x00) {
+             pcount=(pcount+1)%44;
+             if (pcount==0) {
+                lcd.setCursor((pipe*2)+1,1);
+                lcd.write((uint8_t)1);
+                timeout[pipe]=millis()+1000;
+             }
+          }
+       } else {
+          lcd.setCursor((pipe*2)+1,1);
+          lcd.write((uint8_t)0);
+          timeout[pipe]=millis()+1000;
+       }
+    }
+    for (int i=0;i<8;i++) {
+       if (timeout[i] < millis()){
+          lcd.setCursor(1+(i*2),1);
+          lcd.print(" ");
+       }
+    }
+  }
+}
+
+int device_snoop (int key) {
+  int inch = KEY_NONE;
+
+  lcd.setCursor(0,0);
+  lcd.print("Devices:   WNRF ");
+  lcd.setCursor(0,1);
+  clearLine();
+
+  // Listen on both the
+  radio.stopListening();   // Ready to write EN_RXADDR_P0 = 1
+  radio.openReadingPipe(0,addr_server);
+  radio.closeReadingPipe(1);
+  radio.startListening();
+
+  uint8_t pcount=0;
+  uint32_t timeout[2];
+
+  while (inch != KEY_SELECT) {
+    inch = getkey();
+    if (inch >=0) {
+       // Keypress
+    }
+    uint8_t pipe;
+    uint8_t inbuf[32];
+
+    if (radio.available(&pipe)) {
+       pipe=pipe&0x07;
+       uint8_t bytes = radio.getPayloadSize(); // get the size of the payload
+       radio.read(inbuf, bytes);               // fetch payload from FIFO
+       if (pipe==0) {
+          if (inbuf[0] == 0x85) {
+             lcd.setCursor(15,0);
+             lcd.write((uint8_t)0);
+             timeout[pipe]=millis()+1000;
+          }
+          if (inbuf[0] == 0x88) {
+                lcd.setCursor(0,1);
+                for (int i=0;i<3;i++) {
+                  if (inbuf[4-i]<16) {
+                      lcd.print("0");
+                  }
+                  lcd.print(inbuf[4-i],HEX);
+                }
+                timeout[1]=millis()+1000;
+          }
+       }
+    }
+    if (timeout[0] < millis()){
+       lcd.setCursor(15,0);
+       lcd.print(" ");
+    }
+    if (timeout[1] < millis()){
+       lcd.setCursor(0,1);
+       clearLine();
+    }
+  }
+}
+
+const PROGMEM tRFRegInfo regInfo[]={
+   {"NRF_CONFIG",1,0},
+   {"EN_AA",     1,1},
+   {"EN_RXADDR", 1,2},
+   {"SETUP_AW",  1,3},
+   {"SETUP_RETR",1,4},
+   {"RF_CH",     1,5},
+   {"RF_SETUP",  1,6},
+   {"NRF_STATUS",1,7},
+   {"OBSERVE_TX",1,8},
+   {"CD",        1,9},
+   {"RXA0",5,10},
+   {"RXA1",5,15},
+   {"RXA2",1,20},
+   {"RXA3",1,21},
+   {"RXA4",1,22},
+   {"RXA5",1,23},
+   {"TXA", 5,24},
+   {"RXPW0",  1,29},
+   {"RXPW1",  1,30},
+   {"RXPW2",  1,31},
+   {"RXPW3",  1,32},
+   {"RXPW4",  1,33},
+   {"RXPW5",  1,34},
+   {"FIFO_STAT",1,35},
+   {"DYNPD",1, 36},
+   {"FEATURE",1, 37},
+   {"ce_pin",2, 38},
+   {"csn_pin",2,40},
+   {"SPI_SPEED",1,42}
+};
+
+int radio_sanity_test (int key) {
+  int inch = KEY_NONE;
+  uint8_t rf_registers[64];
+  uint8_t dispIndex = 0;
+  tRFRegInfo cache;
+  uint32_t* map = (uint32_t*)rf_registers;
+
+  lcd.setCursor(0,1);
+  radio.encodeRadioDetails((uint8_t*) &(rf_registers[0]));
+  lcd.print("RESULT:");
+  if ((map[0]==0xFFFFFFFF) && (map[1]==0xFFFFFFFF)) {
+     lcd.print("FAIL");
+  } else {
+    Serial.print("DEBUG:");
+    Serial.print(map[0],HEX);
+    Serial.print(",");
+    Serial.print(map[1],HEX);
+    Serial.println(" = PASS");
+     lcd.print("PASS");
+  }
+
+  while (inch != KEY_SELECT) {
+    inch = getkey();
+    if (inch >=0) {
+        memcpy_P(&cache,&(regInfo[dispIndex]),sizeof(tRFRegInfo));
+        lcd.setCursor(0,1);
+        clearLine();
+        lcd.setCursor(0,1);
+        lcd.print(cache.name);
+        lcd.print(":0x");
+        for (int i=0;i<cache.size;i++) {
+           if (rf_registers[cache.offset+i]<16) {
+              lcd.print("0");
+           }
+           lcd.print(rf_registers[cache.offset+i],HEX);
+        }
+        if (inch == KEY_UP) {
+          dispIndex=(dispIndex+1) % 29;
+        }
+        if (inch==KEY_DOWN) {
+          dispIndex=(dispIndex+28)%29;
+        }
+    }
+    // Pause if there is something to see
+  }
+  return 0;
+}
+
+#ifdef LED_TEST
+int led_test ( int key ) {
+  int inch = KEY_NONE;
+  lcd.setCursor(0,1);
+
+  uint8_t cache = PORTC;
+  uint8_t led_count = 0;
+
+  while (inch != KEY_SELECT) {
+    inch = getkey();
+    // Pause if there is something to see
+    if (inch>=0) {
+        if (inch < KEY_NONE) {
+          led_count=(led_count+1)%8;
+
+          lcd.setCursor(14,1);  // Debug code .. but looks nice.
+          lcd.write(led_count);
+
+          digitalWrite(LED_GREEN, (led_count&0x01));
+          digitalWrite(LED_BLUE,  (led_count&0x02));
+          digitalWrite(LED_AMBER, (led_count&0x04));
+          delay(200);
+        }
+    }
+  }
+  digitalWrite(LED_GREEN,cache&0x01);
+  digitalWrite(LED_BLUE, cache&0x02);
+  digitalWrite(LED_AMBER,cache&0x03);
+  return 0;
+}
+#endif
+
 
 int keypad_test (int  key) {
     int error=0;
@@ -913,11 +1138,6 @@ int keypad_test (int  key) {
           case KEY_UP:     lcd.write("^");   break;
           case KEY_DOWN:   lcd.write("v");   break;
           case KEY_SELECT: lcd.write("$");   break;
-       }
-
-       // Pause if there is something to see
-       if (inch > KEY_NONE) {
-         delay(500);
        }
     }
     return error;
@@ -1067,6 +1287,13 @@ int freqScanner(int key) {
   }
 }
 
+//
+// Selection description and pMenuAction to call for it.
+// If the selection callback implements a sub menu then
+// "subMenu" is set to true and the callback will receive
+// key presses.
+//
+
 int dispRFRate(bool display) {
   if (display) {
     lcd.print(cRFRateMenu[indexRFRate].option);
@@ -1089,24 +1316,30 @@ tSelectMenu rfRateMenu={ dispRFRate, &indexRFRate, cRFRateMenu };
 tSelectMenu rfChanMenu={ dispRFChan, &indexRFChan, cRFChanMenu };
 
 tMenuItem SetupMenu[] = {
-   {"RF Rate:",MENU_TYPE_SELECT,selectHandler,(sMenuItem*)&rfRateMenu,SELECT_SIZE(cRFRateMenu)},
-   {"RF Channel:",MENU_TYPE_SELECT,selectHandler,(sMenuItem*)&rfChanMenu,SELECT_SIZE(cRFChanMenu)}
+   {"RF Rate:",      MENU_TYPE_SELECT,selectHandler,(sMenuItem*)&rfRateMenu,SELECT_SIZE(cRFRateMenu)},
+   {"RF Channel:",   MENU_TYPE_SELECT,selectHandler,(sMenuItem*)&rfChanMenu,SELECT_SIZE(cRFChanMenu)}
 };
 
-tMenuItem TestMenu[] = {
-  {"P2P                ",MENU_TYPE_ACTION, NULL, NULL,0},
-  {"Broadcast          ",MENU_TYPE_ACTION, NULL, NULL,0}
+tMenuItem TxTestMenu[] = {
+  {"P2P             ",MENU_TYPE_ACTION, NULL, NULL,0},
+  {"Broadcast       ",MENU_TYPE_ACTION, NULL, NULL,0}
 };
+
 
 tMenuItem RadioMenu[] = {
-  {"TX Test         ", MENU_TYPE_ACTION,NULL, TestMenu, MENU_SIZE(TestMenu)},
-  {"RX Test         ", MENU_TYPE_ACTION,NULL, TestMenu, MENU_SIZE(TestMenu)}
+  {"Sanity Check    ", MENU_TYPE_ACTION, radio_sanity_test, NULL, 0},
+  {"TX Test         ", MENU_TYPE_MENU,NULL, TxTestMenu, MENU_SIZE(TxTestMenu)},
+  {"RX Snoop        ", MENU_TYPE_ACTION,radio_snoop, NULL, 0},
+  {"Dev Snoop       ", MENU_TYPE_ACTION,device_snoop, NULL, 0}
 };
 
 tMenuItem MainMenu[] = {
   {"Setup           ",MENU_TYPE_MENU,NULL,SetupMenu,MENU_SIZE(SetupMenu)},
   {"Radio Test      ",MENU_TYPE_MENU,NULL,RadioMenu,MENU_SIZE(RadioMenu)},
   {"Keypad Test     ",MENU_TYPE_ACTION,keypad_test,NULL,0},
+ #ifdef LED_TEST
+  {"LED Test        ",MENU_TYPE_ACTION,led_test,NULL,0},
+ #endif
   {"Serial Upload   ",MENU_TYPE_ACTION,onSerialUpload,NULL,0},
   {"Frequency Scan  ",MENU_TYPE_ACTION, freqScanner,NULL,0}
 };
@@ -1152,9 +1385,15 @@ int runMenu(tMenuItem *menu, uint8_t menu_size, uint8_t startIndex, uint8_t star
                }
                break;
             case MENU_TYPE_ACTION:
-                Serial.println("ACTION KEY");
-               if (menu[current].pMenuAction)
+               {
+                  uint8_t optionIndex = sub_index;
+                  Serial.print("ACTION KEY");
+                  Serial.println(menu[current].title);
+                  Serial.print("Option:");
+                  Serial.println(optionIndex);
+                  if (menu[current].pMenuAction)
                   done = menu[current].pMenuAction(key);
+               }
                break;
             case MENU_TYPE_SELECT:
               Serial.print("SELECT KEY: return=");
